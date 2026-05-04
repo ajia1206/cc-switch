@@ -3,6 +3,7 @@ mod app_store;
 mod auto_launch;
 mod claude_mcp;
 mod claude_plugin;
+mod codex_accounts;
 mod codex_config;
 mod commands;
 mod config;
@@ -1031,6 +1032,11 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_providers,
+            commands::codex_list_account_snapshots,
+            commands::codex_capture_current_account,
+            commands::codex_switch_account,
+            commands::codex_rollback_last_account_switch,
+            commands::codex_restart_app,
             commands::get_current_provider,
             commands::add_provider,
             commands::update_provider,

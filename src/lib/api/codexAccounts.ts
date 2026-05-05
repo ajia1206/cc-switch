@@ -17,6 +17,17 @@ export interface CodexAccountSwitchResult {
   restartRecommended: boolean;
 }
 
+export interface CodexAppRestartResult {
+  wasRunning: boolean;
+  quitRequested: boolean;
+  quitGraceful: boolean;
+  forceQuitUsed: boolean;
+  opened: boolean;
+  runningAfter: boolean;
+  launchMethod: string;
+  message: string;
+}
+
 export const codexAccountsApi = {
   async list(): Promise<CodexAccountSummary[]> {
     return await invoke("codex_list_account_snapshots");
@@ -36,7 +47,7 @@ export const codexAccountsApi = {
     return await invoke("codex_rollback_last_account_switch");
   },
 
-  async restartCodex(): Promise<boolean> {
+  async restartCodex(): Promise<CodexAppRestartResult> {
     return await invoke("codex_restart_app");
   },
 };

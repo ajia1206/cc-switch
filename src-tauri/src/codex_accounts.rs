@@ -35,6 +35,19 @@ pub struct CodexAccountSwitchResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CodexAppRestartResult {
+    pub was_running: bool,
+    pub quit_requested: bool,
+    pub quit_graceful: bool,
+    pub force_quit_used: bool,
+    pub opened: bool,
+    pub running_after: bool,
+    pub launch_method: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct RegistryItem {
     account_key: String,
     snapshot_path: String,
@@ -324,7 +337,7 @@ pub fn rollback_last_switch() -> Result<CodexAccountSwitchResult, AppError> {
     })
 }
 
-pub fn restart_codex_app() -> Result<bool, AppError> {
+pub fn restart_codex_app() -> Result<CodexAppRestartResult, AppError> {
     restart_codex_app_impl()
 }
 
@@ -751,45 +764,158 @@ fn now_seconds() -> i64 {
 }
 
 #[cfg(target_os = "macos")]
-fn restart_codex_app_impl() -> Result<bool, AppError> {
+fn restart_codex_app_impl() -> Result<CodexAppRestartResult, AppError> {
     use std::process::Command;
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
-    let running = Command::new("pgrep")
-        .args(["-x", "Codex"])
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false);
+    const CODEX_APP_NAME: &str = "Codex";
+    const CODEX_BUNDLE_ID: &str = "com.openai.codex";
+    const CODEX_MAIN_PROCESS_PATTERN: &str = "/Codex.app/Contents/MacOS/Codex";
 
-    if running {
-        let status = Command::new("osascript")
-            .args(["-e", "tell application \"Codex\" to quit"])
-            .status()
-            .map_err(|e| AppError::Message(format!("Failed to quit Codex: {e}")))?;
-        if !status.success() {
-            return Err(AppError::Message(
-                "Codex did not accept the quit request.".to_string(),
-            ));
+    fn osascript(script: &str) -> Result<String, AppError> {
+        let output = Command::new("osascript")
+            .args(["-e", script])
+            .output()
+            .map_err(|e| AppError::Message(format!("Failed to run AppleScript: {e}")))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(AppError::Message(if stderr.is_empty() {
+                "AppleScript command failed without details.".to_string()
+            } else {
+                stderr
+            }));
         }
-        thread::sleep(Duration::from_millis(1200));
+
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
-    let status = Command::new("open")
-        .args(["-a", "Codex"])
-        .status()
-        .map_err(|e| AppError::Message(format!("Failed to open Codex: {e}")))?;
-    if !status.success() {
+    fn is_running_by_script(script: &str) -> Option<bool> {
+        osascript(script)
+            .ok()
+            .and_then(|output| match output.as_str() {
+                "true" => Some(true),
+                "false" => Some(false),
+                _ => None,
+            })
+    }
+
+    fn is_codex_running() -> bool {
+        is_running_by_script(&format!("application id \"{CODEX_BUNDLE_ID}\" is running"))
+            .or_else(|| {
+                is_running_by_script(&format!("application \"{CODEX_APP_NAME}\" is running"))
+            })
+            .unwrap_or(false)
+    }
+
+    fn wait_until_running(expected: bool, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if is_codex_running() == expected {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(250));
+        }
+    }
+
+    fn request_quit() -> Result<(), AppError> {
+        osascript(&format!(
+            "tell application id \"{CODEX_BUNDLE_ID}\" to quit"
+        ))
+        .or_else(|_| osascript(&format!("tell application \"{CODEX_APP_NAME}\" to quit")))
+        .map(|_| ())
+        .map_err(|e| AppError::Message(format!("Failed to quit Codex: {e}")))
+    }
+
+    fn terminate_main_process() -> Result<bool, AppError> {
+        let status = Command::new("pkill")
+            .args(["-TERM", "-f", CODEX_MAIN_PROCESS_PATTERN])
+            .status()
+            .map_err(|e| AppError::Message(format!("Failed to terminate Codex: {e}")))?;
+
+        // pkill returns 1 when no process matched. Treat that as "nothing to do".
+        Ok(status.success() || status.code() == Some(1))
+    }
+
+    fn open_codex() -> Result<String, AppError> {
+        let bundle_status = Command::new("open")
+            .args(["-b", CODEX_BUNDLE_ID])
+            .status()
+            .map_err(|e| AppError::Message(format!("Failed to open Codex by bundle id: {e}")))?;
+
+        if bundle_status.success() {
+            return Ok("bundleId".to_string());
+        }
+
+        let app_status = Command::new("open")
+            .args(["-a", CODEX_APP_NAME])
+            .status()
+            .map_err(|e| AppError::Message(format!("Failed to open Codex by app name: {e}")))?;
+
+        if app_status.success() {
+            Ok("appName".to_string())
+        } else {
+            Err(AppError::Message(
+                "Codex did not accept the open request.".to_string(),
+            ))
+        }
+    }
+
+    let was_running = is_codex_running();
+    let mut quit_requested = false;
+    let mut quit_graceful = !was_running;
+    let mut force_quit_used = false;
+
+    if was_running {
+        quit_requested = true;
+        request_quit()?;
+        quit_graceful = wait_until_running(false, Duration::from_secs(8));
+
+        if !quit_graceful {
+            force_quit_used = terminate_main_process()?;
+            if !wait_until_running(false, Duration::from_secs(4)) {
+                return Err(AppError::Message(
+                    "Codex did not exit completely. Please close it manually and try again."
+                        .to_string(),
+                ));
+            }
+        }
+    }
+
+    let launch_method = open_codex()?;
+    let running_after = wait_until_running(true, Duration::from_secs(10));
+    if !running_after {
         return Err(AppError::Message(
-            "Codex did not accept the open request.".to_string(),
+            "Codex open command succeeded, but the app was not detected as running.".to_string(),
         ));
     }
 
-    Ok(true)
+    let message = if !was_running {
+        "Codex App 已启动".to_string()
+    } else if force_quit_used {
+        "Codex App 已重启，旧进程退出较慢，已做一次温和终止".to_string()
+    } else {
+        "Codex App 已重启".to_string()
+    };
+
+    Ok(CodexAppRestartResult {
+        was_running,
+        quit_requested,
+        quit_graceful,
+        force_quit_used,
+        opened: true,
+        running_after,
+        launch_method,
+        message,
+    })
 }
 
 #[cfg(not(target_os = "macos"))]
-fn restart_codex_app_impl() -> Result<bool, AppError> {
+fn restart_codex_app_impl() -> Result<CodexAppRestartResult, AppError> {
     Err(AppError::Message(
         "Restarting Codex App is currently supported on macOS only.".to_string(),
     ))

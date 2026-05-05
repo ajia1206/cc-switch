@@ -107,11 +107,12 @@ export function CodexAccountsPanel() {
 
   const restartMutation = useMutation({
     mutationFn: () => codexAccountsApi.restartCodex(),
-    onSuccess: () => {
+    onSuccess: (result) => {
       toast.success(
-        t("codexAccounts.restartSuccess", {
-          defaultValue: "Codex App 已重启",
-        }),
+        result.message ||
+          t("codexAccounts.restartSuccess", {
+            defaultValue: "Codex App 已重启",
+          }),
       );
     },
     onError: (error: Error) => {

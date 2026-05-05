@@ -1,6 +1,6 @@
 #![allow(non_snake_case)]
 
-use crate::codex_accounts::{CodexAccountSummary, CodexAccountSwitchResult};
+use crate::codex_accounts::{CodexAccountSummary, CodexAccountSwitchResult, CodexAppRestartResult};
 
 #[tauri::command]
 pub fn codex_list_account_snapshots() -> Result<Vec<CodexAccountSummary>, String> {
@@ -23,6 +23,6 @@ pub fn codex_rollback_last_account_switch() -> Result<CodexAccountSwitchResult, 
 }
 
 #[tauri::command]
-pub fn codex_restart_app() -> Result<bool, String> {
+pub fn codex_restart_app() -> Result<CodexAppRestartResult, String> {
     crate::codex_accounts::restart_codex_app().map_err(Into::into)
 }

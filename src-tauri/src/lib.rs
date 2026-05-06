@@ -1037,6 +1037,7 @@ pub fn run() {
             commands::codex_switch_account,
             commands::codex_rollback_last_account_switch,
             commands::codex_restart_app,
+            commands::get_all_codex_quotas,
             commands::get_current_provider,
             commands::add_provider,
             commands::update_provider,

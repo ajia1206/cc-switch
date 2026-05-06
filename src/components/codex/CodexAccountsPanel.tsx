@@ -9,13 +9,27 @@ import {
   Save,
   Search,
   Undo2,
+  Zap,
 } from "lucide-react";
 import { toast } from "sonner";
 import { codexAccountsApi } from "@/lib/api";
 import type { CodexAccountSummary } from "@/lib/api/codexAccounts";
+import {
+  useAllCodexQuotas,
+  useSettingsQuery,
+  useSaveSettingsMutation,
+} from "@/lib/query";
+import type { SubscriptionQuota } from "@/types/subscription";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 import { extractErrorMessage } from "@/utils/errorUtils";
 
@@ -30,6 +44,12 @@ export function CodexAccountsPanel() {
     queryKey: QUERY_KEY,
     queryFn: () => codexAccountsApi.list(),
   });
+
+  const settingsQuery = useSettingsQuery();
+  const saveSettingsMutation = useSaveSettingsMutation();
+
+  const refreshIntervalSec = settingsQuery.data?.codexQuotaRefreshInterval ?? 300;
+  const quotasQuery = useAllCodexQuotas(true, refreshIntervalSec * 1000);
 
   const accounts = useMemo(
     () => accountsQuery.data ?? [],
@@ -219,6 +239,56 @@ export function CodexAccountsPanel() {
                 )}
                 {t("codexAccounts.restart", { defaultValue: "重启 Codex" })}
               </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => quotasQuery.refetch()}
+                disabled={quotasQuery.isFetching}
+              >
+                {quotasQuery.isFetching ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Zap className="w-4 h-4" />
+                )}
+                {t("codexAccounts.refreshNow", { defaultValue: "立即刷新" })}
+              </Button>
+              <div className="flex items-center gap-1.5">
+                <span className="text-xs text-muted-foreground whitespace-nowrap">
+                  {t("codexAccounts.refreshInterval", { defaultValue: "刷新" })}
+                </span>
+                <Select
+                  value={String(refreshIntervalSec)}
+                  onValueChange={async (value) => {
+                    const sec = Number(value);
+                    const current = settingsQuery.data;
+                    if (!current) return;
+                    try {
+                      await saveSettingsMutation.mutateAsync({
+                        ...current,
+                        codexQuotaRefreshInterval: sec,
+                      });
+                      toast.success(
+                        t("codexAccounts.intervalSaved", {
+                          defaultValue: "刷新间隔已保存",
+                        }),
+                      );
+                    } catch {
+                      // error handled by mutation
+                    }
+                  }}
+                  disabled={saveSettingsMutation.isPending}
+                >
+                  <SelectTrigger className="h-8 w-[90px] text-xs">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="60">1min</SelectItem>
+                    <SelectItem value="300">5min</SelectItem>
+                    <SelectItem value="1800">30min</SelectItem>
+                    <SelectItem value="3600">60min</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
             </div>
           </div>
 
@@ -270,6 +340,7 @@ export function CodexAccountsPanel() {
                 <AccountRow
                   key={account.accountKey}
                   account={account}
+                  quota={quotasQuery.data?.[account.accountKey]}
                   switchingKey={
                     switchMutation.isPending
                       ? switchMutation.variables
@@ -288,13 +359,36 @@ export function CodexAccountsPanel() {
 
 interface AccountRowProps {
   account: CodexAccountSummary;
+  quota?: SubscriptionQuota;
   switchingKey?: string;
   onSwitch: (accountKey: string) => void;
 }
 
-function AccountRow({ account, switchingKey, onSwitch }: AccountRowProps) {
+function formatResetTime(iso: string | null): string {
+  if (!iso) return "";
+  const date = new Date(iso);
+  const now = new Date();
+  const diffMs = date.getTime() - now.getTime();
+  if (diffMs <= 0) return "即将重置";
+  const diffH = Math.floor(diffMs / (1000 * 60 * 60));
+  const diffD = Math.floor(diffH / 24);
+  if (diffD > 0) return `${diffD}天后重置`;
+  if (diffH > 0) return `${diffH}小时后重置`;
+  return "即将重置";
+}
+
+function getUtilizationColor(utilization: number): string {
+  if (utilization >= 90) return "text-red-500";
+  if (utilization >= 70) return "text-orange-500";
+  return "text-emerald-500";
+}
+
+function AccountRow({ account, quota, switchingKey, onSwitch }: AccountRowProps) {
   const { t } = useTranslation();
   const isSwitching = switchingKey === account.accountKey;
+
+  const tier5h = quota?.tiers.find((t) => t.name === "five_hour");
+  const tier7d = quota?.tiers.find((t) => t.name === "seven_day");
 
   return (
     <div
@@ -328,6 +422,44 @@ function AccountRow({ account, switchingKey, onSwitch }: AccountRowProps) {
               </span>
             )}
           </div>
+          {quota && (
+            <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs">
+              {quota.success ? (
+                <>
+                  {tier5h && (
+                    <span className="flex items-center gap-1">
+                      <span className="text-muted-foreground">5h 剩余:</span>
+                      <span className={getUtilizationColor(tier5h.utilization)}>
+                        {Math.max(0, 100 - Math.round(tier5h.utilization))}%
+                      </span>
+                      {tier5h.resetsAt && (
+                        <span className="text-muted-foreground">
+                          · {formatResetTime(tier5h.resetsAt)}
+                        </span>
+                      )}
+                    </span>
+                  )}
+                  {tier7d && (
+                    <span className="flex items-center gap-1">
+                      <span className="text-muted-foreground">7d 剩余:</span>
+                      <span className={getUtilizationColor(tier7d.utilization)}>
+                        {Math.max(0, 100 - Math.round(tier7d.utilization))}%
+                      </span>
+                      {tier7d.resetsAt && (
+                        <span className="text-muted-foreground">
+                          · {formatResetTime(tier7d.resetsAt)}
+                        </span>
+                      )}
+                    </span>
+                  )}
+                </>
+              ) : (
+                <span className="text-muted-foreground">
+                  {quota.error || "无法查询用量"}
+                </span>
+              )}
+            </div>
+          )}
         </div>
         <Button
           size="sm"

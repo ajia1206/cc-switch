@@ -10,6 +10,7 @@ const REFETCH_INTERVAL = 5 * 60 * 1000; // 5 minutes
 export const subscriptionKeys = {
   all: ["subscription"] as const,
   quota: (appId: AppId) => [...subscriptionKeys.all, "quota", appId] as const,
+  allCodexQuotas: () => [...subscriptionKeys.all, "codex", "all-quotas"] as const,
 };
 
 export function useSubscriptionQuota(
@@ -25,6 +26,28 @@ export function useSubscriptionQuota(
     refetchIntervalInBackground: autoQuery,
     refetchOnWindowFocus: autoQuery,
     staleTime: REFETCH_INTERVAL,
+    retry: 1,
+  });
+}
+
+/**
+ * 查询所有 Codex 账号的官方用量（5h / 7d 窗口）
+ *
+ * 返回 accountKey -> SubscriptionQuota 的映射。
+ * 默认每 5 分钟自动刷新一次。
+ */
+export function useAllCodexQuotas(
+  enabled = true,
+  intervalMs: number = REFETCH_INTERVAL,
+) {
+  return useQuery({
+    queryKey: subscriptionKeys.allCodexQuotas(),
+    queryFn: () => subscriptionApi.getAllCodexQuotas(),
+    enabled,
+    refetchInterval: intervalMs > 0 ? intervalMs : false,
+    refetchIntervalInBackground: intervalMs > 0,
+    refetchOnWindowFocus: intervalMs > 0,
+    staleTime: intervalMs,
     retry: 1,
   });
 }

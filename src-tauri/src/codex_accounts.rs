@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use crate::codex_config::{get_codex_auth_path, get_codex_config_dir};
 use crate::config::{atomic_write, get_app_config_dir, read_json_file, write_json_file};
 use crate::error::AppError;
+use crate::services::subscription::{query_codex_quota, SubscriptionQuota};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -761,6 +762,113 @@ fn timestamp_slug() -> String {
 
 fn now_seconds() -> i64 {
     Utc::now().timestamp()
+}
+
+// ── 用量查询 ──────────────────────────────────────────────
+
+/// 读取指定账号快照中的 Codex OAuth 凭据并查询官方用量
+///
+/// 直接读取快照文件（不写入 ~/.codex/auth.json），避免干扰当前正在使用的账号。
+pub async fn get_account_quota(account_key: &str) -> Result<SubscriptionQuota, AppError> {
+    let registry = read_registry_with_snapshot_scan()?;
+    let item = registry
+        .items
+        .iter()
+        .find(|i| i.account_key == account_key)
+        .ok_or_else(|| AppError::Config(format!("Codex account not found: {account_key}")))?;
+
+    let auth: AuthSnapshot = read_json_file(Path::new(&item.snapshot_path))?;
+
+    // 仅 OAuth 模式支持用量查询
+    if auth.auth_mode.as_deref() != Some("chatgpt") {
+        return Ok(SubscriptionQuota {
+            tool: "codex".to_string(),
+            credential_status: crate::services::subscription::CredentialStatus::NotFound,
+            credential_message: Some("API key mode does not support usage query".to_string()),
+            success: false,
+            tiers: vec![],
+            extra_usage: None,
+            error: Some("API key mode does not support usage query".to_string()),
+            queried_at: Some(crate::services::subscription::now_millis()),
+        });
+    }
+
+    let tokens = auth.tokens.ok_or_else(|| {
+        AppError::Config(format!("Missing tokens in snapshot for account {account_key}"))
+    })?;
+
+    let access_token = tokens
+        .get("access_token")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            AppError::Config(format!(
+                "Missing access_token in snapshot for account {account_key}"
+            ))
+        })?;
+
+    let account_id = tokens.get("account_id").and_then(|v| v.as_str());
+
+    let quota = query_codex_quota(
+        access_token,
+        account_id,
+        "codex",
+        "Authentication failed. Please re-login with Codex CLI.",
+    )
+    .await;
+
+    Ok(quota)
+}
+
+/// 查询所有 Codex 账号的用量
+///
+/// 返回 account_key -> SubscriptionQuota 的映射。
+/// 每个账号独立并发查询。
+pub async fn get_all_account_quotas() -> Result<std::collections::HashMap<String, SubscriptionQuota>, AppError> {
+    let accounts = list_accounts()?;
+    let mut results = std::collections::HashMap::new();
+
+    for account in accounts {
+        // API key 模式跳过查询
+        if account.auth_mode == "apikey" {
+            results.insert(
+                account.account_key.clone(),
+                SubscriptionQuota {
+                    tool: "codex".to_string(),
+                    credential_status: crate::services::subscription::CredentialStatus::NotFound,
+                    credential_message: Some("API key mode".to_string()),
+                    success: false,
+                    tiers: vec![],
+                    extra_usage: None,
+                    error: Some("API key mode does not support usage query".to_string()),
+                    queried_at: None,
+                },
+            );
+            continue;
+        }
+
+        match get_account_quota(&account.account_key).await {
+            Ok(quota) => {
+                results.insert(account.account_key.clone(), quota);
+            }
+            Err(e) => {
+                results.insert(
+                    account.account_key.clone(),
+                    SubscriptionQuota {
+                        tool: "codex".to_string(),
+                        credential_status: crate::services::subscription::CredentialStatus::ParseError,
+                        credential_message: Some(e.to_string()),
+                        success: false,
+                        tiers: vec![],
+                        extra_usage: None,
+                        error: Some(e.to_string()),
+                        queried_at: Some(crate::services::subscription::now_millis()),
+                    },
+                );
+            }
+        }
+    }
+
+    Ok(results)
 }
 
 #[cfg(target_os = "macos")]

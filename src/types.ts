@@ -330,6 +330,8 @@ export interface Settings {
   // Windows: "cmd" | "powershell" | "wt"
   // Linux: "gnome-terminal" | "konsole" | "xfce4-terminal" | "alacritty" | "kitty" | "ghostty"
   preferredTerminal?: string;
+  // Codex 多账号用量刷新间隔（秒，默认 300 = 5 分钟）
+  codexQuotaRefreshInterval?: number;
 }
 
 export interface SessionMeta {

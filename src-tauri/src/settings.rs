@@ -219,7 +219,6 @@ pub struct AppSettings {
     pub common_config_confirmed: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
-
     // ===== 主页面显示的应用 =====
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visible_apps: Option<VisibleApps>,
@@ -289,10 +288,17 @@ pub struct AppSettings {
     /// - Linux: "gnome-terminal" | "konsole" | "xfce4-terminal" | "alacritty" | "kitty" | "ghostty"
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preferred_terminal: Option<String>,
+    /// Codex 多账号用量刷新间隔（秒，默认 300 = 5 分钟）
+    #[serde(default = "default_codex_quota_refresh_interval")]
+    pub codex_quota_refresh_interval: u32,
 }
 
 fn default_show_in_tray() -> bool {
     true
+}
+
+fn default_codex_quota_refresh_interval() -> u32 {
+    300
 }
 
 fn default_minimize_to_tray_on_close() -> bool {
@@ -338,6 +344,7 @@ impl Default for AppSettings {
             backup_interval_hours: None,
             backup_retain_count: None,
             preferred_terminal: None,
+            codex_quota_refresh_interval: default_codex_quota_refresh_interval(),
         }
     }
 }
@@ -768,3 +775,4 @@ pub fn update_webdav_sync_status(status: WebDavSyncStatus) -> Result<(), AppErro
         }
     })
 }
+

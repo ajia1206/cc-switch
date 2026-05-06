@@ -1315,7 +1315,7 @@ pub async fn get_subscription_quota(tool: &str) -> Result<SubscriptionQuota, Str
 
 // ── 辅助函数 ──────────────────────────────────────────────
 
-fn now_millis() -> i64 {
+pub(crate) fn now_millis() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()

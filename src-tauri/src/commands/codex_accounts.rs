@@ -1,10 +1,18 @@
 #![allow(non_snake_case)]
 
+use std::collections::HashMap;
+
 use crate::codex_accounts::{CodexAccountSummary, CodexAccountSwitchResult, CodexAppRestartResult};
+use crate::services::subscription::SubscriptionQuota;
 
 #[tauri::command]
 pub fn codex_list_account_snapshots() -> Result<Vec<CodexAccountSummary>, String> {
     crate::codex_accounts::list_accounts().map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn get_all_codex_quotas() -> Result<HashMap<String, SubscriptionQuota>, String> {
+    crate::codex_accounts::get_all_account_quotas().await.map_err(Into::into)
 }
 
 #[tauri::command]

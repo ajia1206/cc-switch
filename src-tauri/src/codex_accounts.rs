@@ -258,6 +258,47 @@ pub fn capture_current(label: Option<String>) -> Result<CodexAccountSummary, App
     Ok(to_summary(&next_item, Some(&account_key)))
 }
 
+pub fn rename_account(
+    account_key: String,
+    profile_name: String,
+) -> Result<CodexAccountSummary, AppError> {
+    let account_key = account_key.trim();
+    if account_key.is_empty() {
+        return Err(AppError::InvalidInput("Missing accountKey.".to_string()));
+    }
+
+    let profile_name = clean_label(Some(&profile_name));
+    if profile_name.is_empty() {
+        return Err(AppError::InvalidInput(
+            "Account name cannot be empty.".to_string(),
+        ));
+    }
+
+    let mut registry = read_registry_with_snapshot_scan()?;
+    let active_account_key = registry.active_account_key.clone();
+    let now = now_seconds();
+    let mut renamed: Option<RegistryItem> = None;
+
+    for item in &mut registry.items {
+        if item.account_key == account_key {
+            item.profile_name = profile_name.clone();
+            item.alias.clear();
+            renamed = Some(item.clone());
+            break;
+        }
+    }
+
+    let Some(item) = renamed else {
+        return Err(AppError::Config(format!(
+            "Codex account not found: {account_key}"
+        )));
+    };
+
+    registry.updated_at = now;
+    write_registry(&registry)?;
+    Ok(to_summary(&item, active_account_key.as_deref()))
+}
+
 pub fn switch_account(account_key: String) -> Result<CodexAccountSwitchResult, AppError> {
     if account_key.trim().is_empty() {
         return Err(AppError::InvalidInput("Missing accountKey.".to_string()));

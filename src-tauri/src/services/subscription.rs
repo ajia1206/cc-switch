@@ -806,8 +806,10 @@ async fn query_codex_for_account(account_key: &str, snapshot_path: &str) -> Subs
                     "Authentication failed. Please re-login with Codex CLI.",
                 )
                 .await;
-                if result.success {
-                    return result;
+                if let Ok(result) = result {
+                    if result.success {
+                        return result;
+                    }
                 }
             }
             SubscriptionQuota::error(
@@ -825,6 +827,9 @@ async fn query_codex_for_account(account_key: &str, snapshot_path: &str) -> Subs
                 "Authentication failed. Please re-login with Codex CLI.",
             )
             .await
+            .unwrap_or_else(|error| {
+                SubscriptionQuota::error(account_key, CredentialStatus::Valid, error)
+            })
         }
     }
 }

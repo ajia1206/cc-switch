@@ -914,15 +914,14 @@ pub async fn get_account_quota(account_key: &str) -> Result<SubscriptionQuota, A
 
     let account_id = tokens.get("account_id").and_then(|v| v.as_str());
 
-    let quota = query_codex_quota(
+    query_codex_quota(
         access_token,
         account_id,
         "codex",
         "Authentication failed. Please re-login with Codex CLI.",
     )
-    .await;
-
-    Ok(quota)
+    .await
+    .map_err(AppError::Message)
 }
 
 /// 查询所有 Codex 账号的用量

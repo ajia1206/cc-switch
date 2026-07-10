@@ -128,7 +128,8 @@ export const providerPresets: ProviderPreset[] = [
   },
   {
     name: "火山Agentplan",
-    websiteUrl: "https://www.volcengine.com/product/ark",
+    websiteUrl:
+      "https://www.volcengine.com/activity/codingplan?ac=MMAP8JTTCAQ2&rc=6J6FV5N2&utm_campaign=hw&utm_content=ccswitch&utm_medium=devrel_tool_web&utm_source=OWO&utm_term=ccswitch",
     apiKeyUrl:
       "https://www.volcengine.com/activity/codingplan?ac=MMAP8JTTCAQ2&rc=6J6FV5N2&utm_campaign=hw&utm_content=ccswitch&utm_medium=devrel_tool_web&utm_source=OWO&utm_term=ccswitch",
     settingsConfig: {
@@ -149,7 +150,8 @@ export const providerPresets: ProviderPreset[] = [
   },
   {
     name: "BytePlus",
-    websiteUrl: "https://www.byteplus.com/en/product/modelark",
+    websiteUrl:
+      "https://www.byteplus.com/en/product/modelark?utm_campaign=hw&utm_content=ccswitch&utm_medium=devrel_tool_web&utm_source=OWO&utm_term=ccswitch",
     apiKeyUrl:
       "https://www.byteplus.com/en/product/modelark?utm_campaign=hw&utm_content=ccswitch&utm_medium=devrel_tool_web&utm_source=OWO&utm_term=ccswitch",
     settingsConfig: {
@@ -171,7 +173,8 @@ export const providerPresets: ProviderPreset[] = [
   },
   {
     name: "DouBaoSeed",
-    websiteUrl: "https://www.volcengine.com/product/doubao",
+    websiteUrl:
+      "https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey?apikey=%7B%7D&utm_campaign=hw&utm_content=ccswitch&utm_medium=devrel_tool_web&utm_source=OWO&utm_term=ccswitch",
     apiKeyUrl:
       "https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey?apikey=%7B%7D&utm_campaign=hw&utm_content=ccswitch&utm_medium=devrel_tool_web&utm_source=OWO&utm_term=ccswitch",
     settingsConfig: {
@@ -587,11 +590,12 @@ export const providerPresets: ProviderPreset[] = [
       env: {
         ANTHROPIC_BASE_URL: "https://api.longcat.chat/anthropic",
         ANTHROPIC_AUTH_TOKEN: "",
-        ANTHROPIC_MODEL: "LongCat-Flash-Chat",
-        ANTHROPIC_DEFAULT_HAIKU_MODEL: "LongCat-Flash-Chat",
-        ANTHROPIC_DEFAULT_SONNET_MODEL: "LongCat-Flash-Chat",
-        ANTHROPIC_DEFAULT_OPUS_MODEL: "LongCat-Flash-Chat",
-        CLAUDE_CODE_MAX_OUTPUT_TOKENS: "6000",
+        ANTHROPIC_MODEL: "LongCat-2.0",
+        ANTHROPIC_SMALL_FAST_MODEL: "LongCat-2.0",
+        ANTHROPIC_DEFAULT_HAIKU_MODEL: "LongCat-2.0",
+        ANTHROPIC_DEFAULT_SONNET_MODEL: "LongCat-2.0",
+        ANTHROPIC_DEFAULT_OPUS_MODEL: "LongCat-2.0",
+        CLAUDE_CODE_MAX_OUTPUT_TOKENS: "131072",
         CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: 1,
       },
     },
@@ -864,7 +868,7 @@ export const providerPresets: ProviderPreset[] = [
   {
     name: "Code0",
     websiteUrl: "https://code0.ai",
-    apiKeyUrl: "https://code0.ai?source=ccswitch",
+    apiKeyUrl: "https://code0.ai/agent/register/B2XHxGjGmRvqgznY",
     settingsConfig: {
       env: {
         ANTHROPIC_BASE_URL: "https://code0.ai",

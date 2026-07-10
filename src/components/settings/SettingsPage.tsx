@@ -512,7 +512,12 @@ export function SettingsPage({
               </TabsContent>
 
               <TabsContent value="usage" className="mt-0">
-                <UsageDashboard />
+                <UsageDashboard
+                  refreshIntervalMs={settings?.usageDashboardRefreshIntervalMs}
+                  onRefreshIntervalChange={(usageDashboardRefreshIntervalMs) =>
+                    handleAutoSave({ usageDashboardRefreshIntervalMs })
+                  }
+                />
               </TabsContent>
             </div>
 

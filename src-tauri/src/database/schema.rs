@@ -296,6 +296,7 @@ impl Database {
                 output_tokens INTEGER NOT NULL DEFAULT 0,
                 cache_read_tokens INTEGER NOT NULL DEFAULT 0,
                 cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+                input_token_semantics INTEGER NOT NULL DEFAULT 0,
                 total_cost_usd TEXT NOT NULL DEFAULT '0',
                 PRIMARY KEY (date, app_type)
             )",
@@ -1316,6 +1317,7 @@ impl Database {
                 output_tokens INTEGER NOT NULL DEFAULT 0,
                 cache_read_tokens INTEGER NOT NULL DEFAULT 0,
                 cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+                input_token_semantics INTEGER NOT NULL DEFAULT 0,
                 total_cost_usd TEXT NOT NULL DEFAULT '0',
                 PRIMARY KEY (date, app_type)
             )",
@@ -1394,6 +1396,14 @@ impl Database {
             Self::add_column_if_missing(
                 conn,
                 "usage_daily_rollups",
+                "input_token_semantics",
+                "INTEGER NOT NULL DEFAULT 0",
+            )?;
+        }
+        if Self::table_exists(conn, "usage_daily_activity_rollups")? {
+            Self::add_column_if_missing(
+                conn,
+                "usage_daily_activity_rollups",
                 "input_token_semantics",
                 "INTEGER NOT NULL DEFAULT 0",
             )?;
@@ -2924,6 +2934,10 @@ mod tests {
             "CREATE TABLE usage_daily_rollups (date TEXT PRIMARY KEY)",
             [],
         )?;
+        conn.execute(
+            "CREATE TABLE usage_daily_activity_rollups (date TEXT PRIMARY KEY)",
+            [],
+        )?;
 
         Database::ensure_input_token_semantics(&conn)?;
 
@@ -2935,6 +2949,11 @@ mod tests {
         assert!(Database::has_column(
             &conn,
             "usage_daily_rollups",
+            "input_token_semantics"
+        )?);
+        assert!(Database::has_column(
+            &conn,
+            "usage_daily_activity_rollups",
             "input_token_semantics"
         )?);
         let log_default: i64 = conn.query_row(

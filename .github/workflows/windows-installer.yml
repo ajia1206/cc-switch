@@ -58,7 +58,7 @@ jobs:
           $destination = Join-Path release-assets $name
           Copy-Item $msi.FullName $destination
           $sha256 = (Get-FileHash $destination -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$sha256  $name" | Set-Content -Path "$destination.sha256" -Encoding ascii
+          [IO.File]::WriteAllText("$destination.sha256", "$sha256  $name`n", [Text.UTF8Encoding]::new($false))
           "name=$name" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "sha256=$sha256" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 

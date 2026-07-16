@@ -133,12 +133,14 @@ fn codex_history_replay_boundary(
 
     let file = fs::File::open(file_path).ok()?;
     let mut thread_settings_fallback = None;
+    let mut session_meta_count = 0u32;
     for (index, line) in BufReader::new(file).lines().enumerate() {
         let Ok(line) = line else {
             continue;
         };
         if !line.contains("\"thread_settings_applied\"")
             && !line.contains("\"inter_agent_communication")
+            && !line.contains("\"session_meta\"")
         {
             continue;
         }
@@ -148,6 +150,10 @@ fn codex_history_replay_boundary(
         let Some(event_type) = value.get("type").and_then(|value| value.as_str()) else {
             continue;
         };
+        if event_type == "session_meta" {
+            session_meta_count += 1;
+            continue;
+        }
         if event_type.starts_with("inter_agent_communication") {
             return Some(index as i64 + 1);
         }
@@ -163,7 +169,14 @@ fn codex_history_replay_boundary(
         }
     }
 
-    thread_settings_fallback
+    // 新版 Codex 会先写当前子线程元数据，再逐步复制父历史，最后才写接管边界。
+    // 若已看到父历史中的第二个 session_meta 但边界尚未落盘，说明文件仍在增长；
+    // 此时暂缓全部 token_count，避免分钟同步与快照写入竞态造成回放入库。
+    if session_meta_count > 1 {
+        Some(i64::MAX)
+    } else {
+        thread_settings_fallback
+    }
 }
 
 fn is_history_snapshot_event(state: &FileParseState, line_offset: i64) -> bool {
@@ -952,6 +965,55 @@ mod tests {
         );
 
         assert_eq!(sync_single_codex_file(&db, &child)?, (1, 2));
+
+        let conn = lock_conn!(db.conn);
+        let usage: (i64, i64, i64) = conn.query_row(
+            "SELECT input_tokens, cache_read_tokens, output_tokens
+             FROM proxy_request_logs
+             WHERE request_id = 'codex_session:thread-v1:child:3'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        assert_eq!(usage, (100, 50, 30));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_subagent_replay_waits_for_inter_agent_boundary_while_snapshot_is_growing(
+    ) -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let temp = tempdir().unwrap();
+        let child = temp.path().join("growing-child.jsonl");
+        let growing_snapshot = vec![
+            session_meta("child", "parent"),
+            session_meta("parent", "parent"),
+            turn_context(),
+            token_count(1_000, 900, 100),
+            serde_json::json!({
+                "timestamp": "2026-07-10T03:00:03Z",
+                "type": "event_msg",
+                "payload": { "type": "thread_settings_applied" }
+            }),
+            token_count(1_200, 1_000, 120),
+        ];
+        write_jsonl(&child, &growing_snapshot);
+
+        assert_eq!(sync_single_codex_file(&db, &child)?, (0, 2));
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let mut completed_snapshot = growing_snapshot;
+        completed_snapshot.extend([
+            serde_json::json!({
+                "timestamp": "2026-07-10T03:00:04Z",
+                "type": "inter_agent_communication_metadata",
+                "payload": { "type": "subagent_started" }
+            }),
+            token_count(1_300, 1_050, 150),
+        ]);
+        write_jsonl(&child, &completed_snapshot);
+
+        assert_eq!(sync_single_codex_file(&db, &child)?, (1, 0));
 
         let conn = lock_conn!(db.conn);
         let usage: (i64, i64, i64) = conn.query_row(

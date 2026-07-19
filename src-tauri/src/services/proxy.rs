@@ -2803,7 +2803,7 @@ impl ProxyService {
         )
         .map_err(|e| format!("构建 Codex 有效配置失败: {e}"))?;
 
-        Self::preserve_codex_mcp_servers_from_existing_config(
+        Self::preserve_toml_mcp_servers_from_existing_config(
             &mut effective_settings,
             &live_config,
         )?;

@@ -76,6 +76,14 @@ const INTENSITY_CLASSES: Record<
     4: "border-sky-500/30 bg-sky-500/75",
     5: "border-sky-500/40 bg-sky-600",
   },
+  grokbuild: {
+    0: "border-border/50 bg-muted/50",
+    1: "border-rose-500/15 bg-rose-500/20",
+    2: "border-rose-500/20 bg-rose-500/35",
+    3: "border-rose-500/25 bg-rose-500/55",
+    4: "border-rose-500/30 bg-rose-500/75",
+    5: "border-rose-500/40 bg-rose-600",
+  },
   opencode: {
     0: "border-border/50 bg-muted/50",
     1: "border-violet-500/15 bg-violet-500/20",
@@ -91,6 +99,7 @@ function getFilterType(appType?: string): AppType | "all" {
     appType === "claude" ||
     appType === "codex" ||
     appType === "gemini" ||
+    appType === "grokbuild" ||
     appType === "opencode"
   ) {
     return appType;

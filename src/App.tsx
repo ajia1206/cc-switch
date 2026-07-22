@@ -1428,9 +1428,9 @@ function App() {
                                 ? "hermes"
                                 : activeApp === "codex"
                                   ? "codex"
-                                : activeApp === "grokbuild"
-                                  ? "grokbuild"
-                                  : "default"
+                                  : activeApp === "grokbuild"
+                                    ? "grokbuild"
+                                    : "default"
                           }
                           className="flex items-center gap-1"
                           initial={{ opacity: 0 }}

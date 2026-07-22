@@ -627,7 +627,7 @@ fn parse_codex_file(
             continue;
         }
 
-        let value: serde_json::Value = match serde_json::from_str(&line) {
+        let value: serde_json::Value = match serde_json::from_str(line) {
             Ok(value) => value,
             Err(_) => continue,
         };
@@ -954,7 +954,9 @@ fn sync_single_codex_file(
                         });
                     }
                     PendingReason::Retryable(_) => {
-                        caches.pending.remove(file_path);
+                        // Keep the entry while retrying. If the parent is still
+                        // incomplete, mark_deferred can suppress the identical
+                        // warning without preventing the next retry.
                     }
                     _ => {
                         caches.pending.remove(file_path);

@@ -440,6 +440,8 @@ export interface Settings {
   preferredTerminal?: string;
   // Codex 多账号用量刷新间隔（秒，默认 300 = 5 分钟）
   codexQuotaRefreshInterval?: number;
+  // 根据本机交互与 Codex 活动动态调整后台刷新频率
+  usageAdaptiveRefresh?: boolean;
 
   // ===== 本机自动迁移状态 =====
   localMigrations?: {

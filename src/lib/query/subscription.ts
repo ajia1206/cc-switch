@@ -17,6 +17,8 @@ export const subscriptionKeys = {
   allCodexQuotas: () =>
     [...subscriptionKeys.all, "codex", "all-quotas"] as const,
   codexAll: () => subscriptionKeys.allCodexQuotas(),
+  codexForecasts: () =>
+    [...subscriptionKeys.all, "codex", "quota-forecasts"] as const,
 };
 
 interface CodexAllQuotasQueryOptions {
@@ -128,27 +130,6 @@ export function useSubscriptionQuota(
   return useQuotaKeepLastGood(query, appId);
 }
 
-/**
- * 查询所有 Codex 账号的官方用量（5h / 7d 窗口）
- *
- * 返回 accountKey -> SubscriptionQuota 的映射。
- * 默认每 5 分钟自动刷新一次。
- */
-export function useAllCodexQuotas(
-  enabled = true,
-  intervalMs: number = REFETCH_INTERVAL,
-) {
-  const autoRefresh = intervalMs > 0;
-
-  return useCodexAllQuotasQuery({
-    enabled,
-    refetchInterval: intervalMs > 0 ? intervalMs : false,
-    refetchIntervalInBackground: autoRefresh,
-    refetchOnWindowFocus: autoRefresh,
-    staleTime: intervalMs,
-  });
-}
-
 export interface UseCodexAllQuotasOptions {
   enabled?: boolean;
   /** 是否启用自动轮询（与 settings 中的 usage_refresh_interval_secs 同步） */
@@ -172,6 +153,15 @@ export function useCodexAllQuotas(options: UseCodexAllQuotasOptions = {}) {
     refetchIntervalInBackground: autoQuery,
     refetchOnWindowFocus: autoQuery,
     staleTime: intervalMs,
+  });
+}
+
+export function useCodexQuotaForecasts(enabled = true) {
+  return useQuery({
+    queryKey: subscriptionKeys.codexForecasts(),
+    queryFn: () => subscriptionApi.getCodexQuotaForecasts(),
+    enabled,
+    staleTime: Number.POSITIVE_INFINITY,
   });
 }
 

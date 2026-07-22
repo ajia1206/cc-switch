@@ -486,6 +486,9 @@ pub struct AppSettings {
     /// Codex 多账号用量刷新间隔（秒，默认 300 = 5 分钟）
     #[serde(default = "default_codex_quota_refresh_interval")]
     pub codex_quota_refresh_interval: u32,
+    /// 根据最近的托盘交互和 Codex 会话活动动态调整刷新频率
+    #[serde(default)]
+    pub usage_adaptive_refresh: bool,
 
     // ===== 本机自动迁移状态 =====
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -579,6 +582,7 @@ impl Default for AppSettings {
             backup_retain_count: None,
             preferred_terminal: None,
             codex_quota_refresh_interval: default_codex_quota_refresh_interval(),
+            usage_adaptive_refresh: false,
             local_migrations: None,
             usage_refresh_interval_secs: default_usage_refresh_interval(),
             usage_auto_refresh: true,

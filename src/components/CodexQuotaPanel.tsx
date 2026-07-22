@@ -10,10 +10,13 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { CodexAccountsManager } from "@/components/codex/CodexAccountsPanel";
+import { CodexQuotaForecastBadge } from "@/components/codex/CodexQuotaForecastBadge";
 import { codexAccountsApi } from "@/lib/api";
 import type { CodexAccountSummary } from "@/lib/api/codexAccounts";
-import { useSettingsQuery } from "@/lib/query";
-import { useCodexAllQuotas } from "@/lib/query/subscription";
+import {
+  useCodexAllQuotas,
+  useCodexQuotaForecasts,
+} from "@/lib/query/subscription";
 import { cn } from "@/lib/utils";
 import type { QuotaTier } from "@/types/subscription";
 
@@ -98,15 +101,11 @@ export function CodexQuotaPanel() {
     queryKey: CODEX_ACCOUNTS_QUERY_KEY,
     queryFn: () => codexAccountsApi.list(),
   });
-  const settingsQuery = useSettingsQuery();
-  const refreshIntervalMs =
-    (settingsQuery.data?.codexQuotaRefreshInterval ?? 300) * 1000;
-  const autoRefresh = settingsQuery.data?.usageAutoRefresh !== false;
   const quotasQuery = useCodexAllQuotas({
-    enabled: autoRefresh,
-    autoQuery: autoRefresh,
-    intervalMs: refreshIntervalMs,
+    enabled: true,
+    autoQuery: false,
   });
+  const forecastsQuery = useCodexQuotaForecasts();
 
   const accounts = useMemo(
     () => accountsQuery.data ?? [],
@@ -118,6 +117,11 @@ export function CodexQuotaPanel() {
   const featuredQuota = featuredAccount
     ? quotasQuery.data?.[featuredAccount.accountKey]
     : quotaEntries[0]?.[1];
+  const featuredAccountKey =
+    featuredAccount?.accountKey ?? quotaEntries[0]?.[0];
+  const featuredForecast = featuredAccountKey
+    ? forecastsQuery.data?.[featuredAccountKey]
+    : undefined;
   const fiveHour = featuredQuota?.tiers.find(
     (tier) => tier.name === "five_hour",
   );
@@ -125,9 +129,9 @@ export function CodexQuotaPanel() {
     (tier) => tier.name === "seven_day",
   );
 
-  const refreshAll = () => {
-    void accountsQuery.refetch();
-    void quotasQuery.refetch();
+  const refreshAll = async () => {
+    await Promise.all([accountsQuery.refetch(), quotasQuery.refetch()]);
+    await forecastsQuery.refetch();
   };
 
   return (
@@ -161,7 +165,7 @@ export function CodexQuotaPanel() {
             <Button
               variant="outline"
               size="sm"
-              onClick={refreshAll}
+              onClick={() => void refreshAll()}
               disabled={accountsQuery.isFetching || quotasQuery.isFetching}
             >
               <RefreshCw
@@ -225,6 +229,9 @@ export function CodexQuotaPanel() {
                       ).toLocaleString()}
                     </span>
                   ) : null}
+                </div>
+                <div className="mt-2">
+                  <CodexQuotaForecastBadge forecast={featuredForecast} />
                 </div>
               </div>
 

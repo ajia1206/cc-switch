@@ -1,4 +1,4 @@
-import { Activity, Clock } from "lucide-react";
+import { Activity, Clock, Gauge } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { SettingsFormState } from "@/hooks/useSettings";
 import { ToggleRow } from "@/components/ui/toggle-row";
@@ -41,6 +41,19 @@ export function UsageSettings({ settings, onChange }: UsageSettingsProps) {
           onCheckedChange={(value) => onChange({ usageAutoRefresh: value })}
         />
 
+        <ToggleRow
+          icon={<Gauge className="h-4 w-4 text-amber-500" />}
+          title={t("settings.usageAdaptiveRefresh", {
+            defaultValue: "Adaptive refresh",
+          })}
+          description={t("settings.usageAdaptiveRefreshDescription", {
+            defaultValue:
+              "Refresh faster during Codex activity and back off while idle.",
+          })}
+          checked={settings.usageAdaptiveRefresh ?? false}
+          onCheckedChange={(value) => onChange({ usageAdaptiveRefresh: value })}
+        />
+
         <div className="flex items-center justify-between gap-4 rounded-lg border bg-card p-4">
           <div className="min-w-0">
             <div className="text-sm font-medium">
@@ -59,6 +72,7 @@ export function UsageSettings({ settings, onChange }: UsageSettingsProps) {
             onValueChange={(value) =>
               onChange({ codexQuotaRefreshInterval: Number(value) })
             }
+            disabled={settings.usageAdaptiveRefresh ?? false}
           >
             <SelectTrigger className="h-9 w-[120px]">
               <SelectValue />

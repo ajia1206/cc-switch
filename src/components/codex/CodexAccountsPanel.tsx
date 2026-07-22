@@ -17,12 +17,17 @@ import { toast } from "sonner";
 import { codexAccountsApi } from "@/lib/api";
 import type { CodexAccountSummary } from "@/lib/api/codexAccounts";
 import {
-  useAllCodexQuotas,
+  useCodexAllQuotas,
+  useCodexQuotaForecasts,
   useSettingsQuery,
   useSaveSettingsMutation,
 } from "@/lib/query";
 import { subscriptionKeys } from "@/lib/query/subscription";
-import type { SubscriptionQuota } from "@/types/subscription";
+import type {
+  CodexQuotaForecast,
+  SubscriptionQuota,
+} from "@/types/subscription";
+import { CodexQuotaForecastBadge } from "./CodexQuotaForecastBadge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -69,7 +74,8 @@ export function CodexAccountsManager({
 
   const refreshIntervalSec =
     settingsQuery.data?.codexQuotaRefreshInterval ?? 300;
-  const quotasQuery = useAllCodexQuotas(true, refreshIntervalSec * 1000);
+  const quotasQuery = useCodexAllQuotas({ enabled: true, autoQuery: false });
+  const forecastsQuery = useCodexQuotaForecasts();
 
   const accounts = useMemo(
     () => accountsQuery.data ?? [],
@@ -274,7 +280,10 @@ export function CodexAccountsManager({
       <Button
         variant="outline"
         size="sm"
-        onClick={() => quotasQuery.refetch()}
+        onClick={async () => {
+          await quotasQuery.refetch();
+          await forecastsQuery.refetch();
+        }}
         disabled={quotasQuery.isFetching}
       >
         {quotasQuery.isFetching ? (
@@ -286,7 +295,11 @@ export function CodexAccountsManager({
       </Button>
       <div className="flex items-center gap-1.5">
         <span className="text-xs text-muted-foreground whitespace-nowrap">
-          {t("codexAccounts.refreshInterval", { defaultValue: "刷新" })}
+          {settingsQuery.data?.usageAdaptiveRefresh
+            ? t("settings.usageAdaptiveRefresh", {
+                defaultValue: "Adaptive refresh",
+              })
+            : t("codexAccounts.refreshInterval", { defaultValue: "刷新" })}
         </span>
         <Select
           value={String(refreshIntervalSec)}
@@ -308,7 +321,10 @@ export function CodexAccountsManager({
               // error handled by mutation
             }
           }}
-          disabled={saveSettingsMutation.isPending}
+          disabled={
+            saveSettingsMutation.isPending ||
+            settingsQuery.data?.usageAdaptiveRefresh === true
+          }
         >
           <SelectTrigger className="h-8 w-[90px] text-xs">
             <SelectValue />
@@ -396,6 +412,7 @@ export function CodexAccountsManager({
               key={account.accountKey}
               account={account}
               quota={quotasQuery.data?.[account.accountKey]}
+              forecast={forecastsQuery.data?.[account.accountKey]}
               switchingKey={
                 switchMutation.isPending ? switchMutation.variables : undefined
               }
@@ -419,6 +436,7 @@ export function CodexAccountsManager({
 interface AccountRowProps {
   account: CodexAccountSummary;
   quota?: SubscriptionQuota;
+  forecast?: CodexQuotaForecast;
   switchingKey?: string;
   onSwitch: (accountKey: string) => void;
   renamingKey?: string;
@@ -434,6 +452,7 @@ function getUtilizationColor(utilization: number): string {
 function AccountRow({
   account,
   quota,
+  forecast,
   switchingKey,
   onSwitch,
   renamingKey,
@@ -571,6 +590,7 @@ function AccountRow({
                       )}
                     </span>
                   )}
+                  <CodexQuotaForecastBadge forecast={forecast} />
                 </>
               ) : (
                 <span className="text-muted-foreground">

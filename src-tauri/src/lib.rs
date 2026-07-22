@@ -1060,6 +1060,7 @@ pub fn run() {
                     // 让用户下一次（或快速打开菜单的那一刻）看到较新的数字。
                     // refresh_all_usage_in_tray 内部有 10 秒防抖。
                     TrayIconEvent::Enter { .. } => {
+                        crate::services::adaptive_refresh::record_interaction();
                         let app = tray.app_handle().clone();
                         tauri::async_runtime::spawn(async move {
                             crate::tray::refresh_all_usage_in_tray(&app).await;
@@ -1071,6 +1072,7 @@ pub fn run() {
                         rect,
                         ..
                     } => {
+                        crate::services::adaptive_refresh::record_interaction();
                         let app = tray.app_handle().clone();
                         tauri::async_runtime::spawn({
                             let app = app.clone();
@@ -1145,7 +1147,11 @@ pub fn run() {
                             continue;
                         }
 
-                        let refresh_interval = codex_quota_refresh_interval_duration(&settings);
+                        let refresh_interval = if settings.usage_adaptive_refresh {
+                            crate::services::adaptive_refresh::refresh_interval()
+                        } else {
+                            codex_quota_refresh_interval_duration(&settings)
+                        };
                         if let Some(last_refresh_at) = last_refresh {
                             let elapsed = last_refresh_at.elapsed();
                             if elapsed < refresh_interval {
@@ -1160,18 +1166,30 @@ pub fn run() {
 
                         let results =
                             crate::services::subscription::get_all_codex_quotas().await;
-                        if let Some(state) = app_handle.try_state::<AppState>() {
+                        let forecasts = if let Some(state) = app_handle.try_state::<AppState>() {
+                            let forecasts = crate::services::quota_forecast::record_and_forecast(
+                                &state.db,
+                                results.iter().map(|(key, quota)| (key, quota)),
+                            )
+                            .unwrap_or_else(|error| {
+                                log::warn!("保存 Codex 额度历史失败: {error}");
+                                std::collections::HashMap::new()
+                            });
                             for (account_key, quota) in &results {
                                 state
                                     .usage_cache
                                     .put_codex_account(account_key.clone(), quota.clone());
                             }
-                        }
+                            forecasts
+                        } else {
+                            std::collections::HashMap::new()
+                        };
                         let payload = serde_json::json!({
                             "kind": "codex-all",
                             "accounts": results.iter().map(|(k, q)| {
                                 serde_json::json!({"accountKey": k, "quota": q})
                             }).collect::<Vec<_>>(),
+                            "forecasts": forecasts,
                         });
                         if let Err(e) = app_handle.emit("codex-account-quotas-updated", payload) {
                             log::warn!("emit codex-account-quotas-updated (定时任务) 失败: {e}");
@@ -1322,13 +1340,17 @@ pub fn run() {
                             crate::services::session_usage::sync_all_unlocked(&db)
                         });
                         match task.await {
-                            Ok(result) if !result.errors.is_empty() => {
-                                log::warn!(
-                                    "Session usage sync completed with {} error(s)",
-                                    result.errors.len()
-                                );
+                            Ok(result) => {
+                                if result.imported > 0 {
+                                    crate::services::adaptive_refresh::record_coding_activity();
+                                }
+                                if !result.errors.is_empty() {
+                                    log::warn!(
+                                        "Session usage sync completed with {} error(s)",
+                                        result.errors.len()
+                                    );
+                                }
                             }
-                            Ok(_) => {}
                             Err(error) => log::warn!("Session usage blocking task failed: {error}"),
                         }
                     }
@@ -1405,6 +1427,7 @@ pub fn run() {
             commands::codex_rollback_last_account_switch,
             commands::codex_restart_app,
             commands::get_all_codex_quotas,
+            commands::get_codex_quota_forecasts,
             commands::get_current_provider,
             commands::add_provider,
             commands::update_provider,

@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use crate::codex_accounts::{CodexAccountSummary, CodexAccountSwitchResult, CodexAppRestartResult};
+use crate::services::quota_forecast::CodexQuotaForecast;
 use crate::services::subscription::SubscriptionQuota;
 use crate::store::AppState;
 use tauri::{Emitter, State};
@@ -22,6 +23,12 @@ pub async fn get_all_codex_quotas(
             .await
             .map_err(Into::<String>::into)?;
 
+    let forecasts = crate::services::quota_forecast::record_and_forecast(&state.db, quotas.iter())
+        .unwrap_or_else(|error| {
+            log::warn!("保存 Codex 额度历史失败: {error}");
+            HashMap::new()
+        });
+
     for (account_key, quota) in &quotas {
         state
             .usage_cache
@@ -33,6 +40,7 @@ pub async fn get_all_codex_quotas(
         "accounts": quotas.iter().map(|(account_key, quota)| {
             serde_json::json!({ "accountKey": account_key, "quota": quota })
         }).collect::<Vec<_>>(),
+        "forecasts": forecasts,
     });
     if let Err(e) = app.emit("codex-account-quotas-updated", payload) {
         log::error!("emit codex-account-quotas-updated 失败: {e}");
@@ -40,6 +48,13 @@ pub async fn get_all_codex_quotas(
     crate::tray::schedule_tray_refresh(&app);
 
     Ok(quotas)
+}
+
+#[tauri::command]
+pub fn get_codex_quota_forecasts(
+    state: State<'_, AppState>,
+) -> Result<HashMap<String, CodexQuotaForecast>, String> {
+    crate::services::quota_forecast::load_forecasts(&state.db).map_err(Into::into)
 }
 
 #[tauri::command]

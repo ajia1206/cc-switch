@@ -354,6 +354,9 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
 
+        // 21. Codex quota history (used for local 5h -> 7d runway forecasts)
+        Self::ensure_codex_quota_history_table(conn)?;
+
         // 修复跑过未发布开发版的库：current 标记曾是全局 key，现按应用分组
         // （随 v12 定稿为 current_profile_id_<scope>，不单独 bump 版本）
         if conn
@@ -545,6 +548,11 @@ impl Database {
                         log::info!("迁移数据库从 v15 到 v16（重建 Codex 会话用量）");
                         Self::migrate_v15_to_v16(conn)?;
                         Self::set_user_version(conn, 16)?;
+                    }
+                    16 => {
+                        log::info!("迁移数据库从 v16 到 v17（补齐额度预测并兼容重建 Codex 用量）");
+                        Self::migrate_v16_to_v17(conn)?;
+                        Self::set_user_version(conn, 17)?;
                     }
                     _ => {
                         return Err(AppError::Database(format!(
@@ -1403,6 +1411,37 @@ impl Database {
     fn migrate_v14_to_v15(conn: &Connection) -> Result<(), AppError> {
         Self::migrate_v13_to_v14(conn)?;
         Self::ensure_grokbuild_skill_mcp_flags(conn)
+    }
+
+    fn migrate_v16_to_v17(conn: &Connection) -> Result<(), AppError> {
+        // Local v3.17.1 and upstream v3.18.0 both used schema v16 for
+        // different migrations. Reapply the upstream reset idempotently so
+        // either database lineage reaches the same v17 state.
+        Self::migrate_v15_to_v16(conn)?;
+        Self::ensure_codex_quota_history_table(conn)
+    }
+
+    fn ensure_codex_quota_history_table(conn: &Connection) -> Result<(), AppError> {
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS codex_quota_history (
+                account_key TEXT NOT NULL,
+                captured_at INTEGER NOT NULL,
+                five_hour_utilization REAL NOT NULL,
+                five_hour_resets_at INTEGER NOT NULL,
+                seven_day_utilization REAL NOT NULL,
+                seven_day_resets_at INTEGER NOT NULL,
+                PRIMARY KEY (account_key, captured_at)
+            )",
+            [],
+        )
+        .map_err(|e| AppError::Database(format!("创建 codex_quota_history 表失败: {e}")))?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_codex_quota_history_account_time
+             ON codex_quota_history(account_key, captured_at)",
+            [],
+        )
+        .map_err(|e| AppError::Database(format!("创建 Codex 额度历史索引失败: {e}")))?;
+        Ok(())
     }
 
     fn ensure_input_token_semantics(conn: &Connection) -> Result<(), AppError> {
@@ -3243,7 +3282,7 @@ mod tests {
     }
 
     #[test]
-    fn migrate_v15_to_v16_resets_only_codex_session_usage() -> Result<(), AppError> {
+    fn migrate_v15_to_v17_resets_only_codex_session_usage() -> Result<(), AppError> {
         let conn = Connection::open_in_memory()?;
         Database::create_tables_on_conn(&conn)?;
         conn.execute_batch(
@@ -3268,7 +3307,7 @@ mod tests {
 
         Database::apply_schema_migrations_on_conn(&conn)?;
 
-        assert_eq!(Database::get_user_version(&conn)?, 16);
+        assert_eq!(Database::get_user_version(&conn)?, SCHEMA_VERSION);
         let counts: (i64, i64, i64, i64) = conn.query_row(
             "SELECT
                 (SELECT COUNT(*) FROM proxy_request_logs WHERE data_source = 'codex_session'),
@@ -3279,6 +3318,35 @@ mod tests {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )?;
         assert_eq!(counts, (0, 1, 0, 1));
+        assert!(Database::table_exists(&conn, "codex_quota_history")?);
+        Ok(())
+    }
+
+    #[test]
+    fn migrate_v16_to_v17_reconciles_local_and_upstream_schema() -> Result<(), AppError> {
+        let conn = Connection::open_in_memory()?;
+        Database::create_tables_on_conn(&conn)?;
+        conn.execute("DROP TABLE codex_quota_history", [])?;
+        conn.execute(
+            "INSERT INTO proxy_request_logs (
+                request_id, provider_id, app_type, model, input_tokens,
+                output_tokens, cache_read_tokens, latency_ms, status_code,
+                created_at, data_source
+             ) VALUES ('codex-row', '_codex_session', 'codex', 'gpt', 1, 1, 0, 0, 200, 1, 'codex_session')",
+            [],
+        )?;
+        Database::set_user_version(&conn, 16)?;
+
+        Database::apply_schema_migrations_on_conn(&conn)?;
+
+        assert_eq!(Database::get_user_version(&conn)?, SCHEMA_VERSION);
+        assert!(Database::table_exists(&conn, "codex_quota_history")?);
+        let codex_rows: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM proxy_request_logs WHERE data_source = 'codex_session'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(codex_rows, 0);
         Ok(())
     }
 }

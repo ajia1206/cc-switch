@@ -40,6 +40,7 @@ export const settingsSchema = z.object({
 
   // Codex 用量刷新间隔（秒，默认 300）
   codexQuotaRefreshInterval: z.number().min(30).optional(),
+  usageAdaptiveRefresh: z.boolean().optional(),
 
   // 用量查询设置
   usageRefreshIntervalSecs: z.number().min(30).optional(),

@@ -22,6 +22,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useBackupManager } from "@/hooks/useBackupManager";
 import { extractErrorMessage } from "@/utils/errorUtils";
+import { MakaLlmBackupSection } from "@/components/settings/MakaLlmBackupSection";
 
 interface BackupListSectionProps {
   backupIntervalHours?: number;
@@ -405,6 +406,8 @@ export function BackupListSection({
           </div>
         )}
       </div>
+
+      <MakaLlmBackupSection />
 
       {/* Restore Confirmation Dialog */}
       <Dialog

@@ -601,6 +601,7 @@ pub fn sync_codex_usage(db: &Database) -> Result<SessionSyncResult, AppError> {
         suspected_duplicates: 0,
         deferred_files: 0,
         errors: vec![],
+        data_changed: false,
     };
 
     for file_path in &files {
@@ -637,7 +638,7 @@ pub fn sync_codex_usage(db: &Database) -> Result<SessionSyncResult, AppError> {
 }
 
 /// 收集所有 Codex 会话 JSONL 文件
-fn collect_codex_session_files(codex_dir: &Path) -> Vec<PathBuf> {
+pub(crate) fn collect_codex_session_files(codex_dir: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
 
     // 1. 扫描 sessions/YYYY/MM/DD/*.jsonl（日期分区目录）

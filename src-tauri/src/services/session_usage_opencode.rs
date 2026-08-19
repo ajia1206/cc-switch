@@ -53,6 +53,7 @@ pub fn sync_opencode_usage(db: &Database) -> Result<SessionSyncResult, AppError>
             suspected_duplicates: 0,
             deferred_files: 0,
             errors: vec![],
+            data_changed: false,
         });
     }
 
@@ -82,6 +83,7 @@ pub fn sync_opencode_usage(db: &Database) -> Result<SessionSyncResult, AppError>
             suspected_duplicates: 0,
             deferred_files: 0,
             errors: vec![],
+            data_changed: false,
         });
     }
 
@@ -97,6 +99,7 @@ pub fn sync_opencode_usage(db: &Database) -> Result<SessionSyncResult, AppError>
         suspected_duplicates: 0,
         deferred_files: 0,
         errors: vec![],
+        data_changed: false,
     };
     let mut has_sync_errors = false;
 

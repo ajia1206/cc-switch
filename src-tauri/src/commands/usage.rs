@@ -8,6 +8,8 @@ use serde::Serialize;
 use std::time::Instant;
 use tauri::State;
 
+use crate::services::session_insights::CodexSessionInsights;
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TrayUsageOverview {
@@ -118,6 +120,19 @@ pub fn get_tray_usage_overview(
         models,
         trends,
     })
+}
+
+/// Aggregate native Codex task/runtime metrics for the tray usage panel.
+#[tauri::command]
+pub async fn get_codex_session_insights(
+    start_date: Option<i64>,
+    end_date: Option<i64>,
+) -> Result<CodexSessionInsights, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::services::session_insights::get_codex_session_insights(start_date, end_date)
+    })
+    .await
+    .map_err(|error| AppError::Config(format!("Codex session insights task failed: {error}")))
 }
 
 /// 获取每日趋势

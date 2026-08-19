@@ -16,6 +16,7 @@ import type {
   SessionSyncResult,
   DataSourceSummary,
   TrayUsageOverview,
+  CodexSessionInsights,
 } from "@/types/usage";
 import type { UsageResult } from "@/types";
 import type { AppId } from "./types";
@@ -94,6 +95,13 @@ export const usageApi = {
       providerName,
       model,
     });
+  },
+
+  getCodexSessionInsights: async (
+    startDate?: number,
+    endDate?: number,
+  ): Promise<CodexSessionInsights> => {
+    return invoke("get_codex_session_insights", { startDate, endDate });
   },
 
   getUsageTrends: async (

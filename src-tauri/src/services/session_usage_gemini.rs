@@ -49,6 +49,7 @@ pub fn sync_gemini_usage(db: &Database) -> Result<SessionSyncResult, AppError> {
         suspected_duplicates: 0,
         deferred_files: 0,
         errors: vec![],
+        data_changed: false,
     };
 
     if files.is_empty() {

@@ -108,14 +108,49 @@ export function CodexAccountsManager({
   });
 
   const switchMutation = useMutation({
-    mutationFn: (accountKey: string) => codexAccountsApi.switch(accountKey),
-    onSuccess: async (result) => {
-      await invalidate();
+    mutationFn: async (accountKey: string) => {
+      const switchResult = await codexAccountsApi.switch(accountKey);
+
+      if (!switchResult.restartRecommended) {
+        return { switchResult, restartResult: null, restartError: null };
+      }
+
+      try {
+        const restartResult = await codexAccountsApi.restartCodex();
+        return { switchResult, restartResult, restartError: null };
+      } catch (error) {
+        return {
+          switchResult,
+          restartResult: null,
+          restartError: extractErrorMessage(error),
+        };
+      }
+    },
+    onSuccess: async ({ switchResult, restartResult, restartError }) => {
+      await Promise.all([
+        invalidate(),
+        queryClient.invalidateQueries({
+          queryKey: subscriptionKeys.allCodexQuotas(),
+        }),
+      ]);
+
+      if (restartError) {
+        toast.warning(
+          t("codexAccounts.switchRestartFailed", {
+            defaultValue:
+              "账号已切换，但 Codex App 重启失败：{{error}}。请手动重启 Codex App。",
+            error: restartError,
+          }),
+        );
+        return;
+      }
+
       toast.success(
-        result.restartRecommended
-          ? t("codexAccounts.switchSuccessRestart", {
-              defaultValue: "账号已切换，建议重启 Codex App",
-            })
+        switchResult.restartRecommended
+          ? restartResult?.message ||
+              t("codexAccounts.switchSuccessRestart", {
+                defaultValue: "账号已切换，Codex App 已重启",
+              })
           : t("codexAccounts.switchSuccess", {
               defaultValue: "账号已是当前账号",
             }),
@@ -161,13 +196,51 @@ export function CodexAccountsManager({
   });
 
   const rollbackMutation = useMutation({
-    mutationFn: () => codexAccountsApi.rollback(),
-    onSuccess: async () => {
-      await invalidate();
-      toast.success(
-        t("codexAccounts.rollbackSuccess", {
-          defaultValue: "已回滚到上一次 Codex 账号",
+    mutationFn: async () => {
+      const switchResult = await codexAccountsApi.rollback();
+
+      if (!switchResult.restartRecommended) {
+        return { switchResult, restartResult: null, restartError: null };
+      }
+
+      try {
+        const restartResult = await codexAccountsApi.restartCodex();
+        return { switchResult, restartResult, restartError: null };
+      } catch (error) {
+        return {
+          switchResult,
+          restartResult: null,
+          restartError: extractErrorMessage(error),
+        };
+      }
+    },
+    onSuccess: async ({ switchResult, restartResult, restartError }) => {
+      await Promise.all([
+        invalidate(),
+        queryClient.invalidateQueries({
+          queryKey: subscriptionKeys.allCodexQuotas(),
         }),
+      ]);
+
+      if (restartError) {
+        toast.warning(
+          t("codexAccounts.rollbackRestartFailed", {
+            defaultValue:
+              "已回滚到上一次 Codex 账号，但 Codex App 重启失败：{{error}}。请手动重启 Codex App。",
+            error: restartError,
+          }),
+        );
+        return;
+      }
+
+      toast.success(
+        switchResult.restartRecommended && restartResult
+          ? t("codexAccounts.rollbackSuccessRestart", {
+              defaultValue: "已回滚到上一次 Codex 账号，Codex App 已重启",
+            })
+          : t("codexAccounts.rollbackSuccess", {
+              defaultValue: "已回滚到上一次 Codex 账号",
+            }),
       );
     },
     onError: (error: Error) => {
@@ -221,6 +294,13 @@ export function CodexAccountsManager({
     },
   });
 
+  const isAccountActionPending =
+    captureMutation.isPending ||
+    switchMutation.isPending ||
+    renameMutation.isPending ||
+    rollbackMutation.isPending ||
+    restartMutation.isPending;
+
   const toolbar = (
     <div className="flex flex-wrap items-center gap-2">
       <Button
@@ -255,7 +335,7 @@ export function CodexAccountsManager({
         variant="outline"
         size="sm"
         onClick={() => rollbackMutation.mutate()}
-        disabled={rollbackMutation.isPending}
+        disabled={isAccountActionPending}
       >
         {rollbackMutation.isPending ? (
           <Loader2 className="w-4 h-4 animate-spin" />
@@ -268,7 +348,7 @@ export function CodexAccountsManager({
         variant="outline"
         size="sm"
         onClick={() => restartMutation.mutate()}
-        disabled={restartMutation.isPending}
+        disabled={isAccountActionPending}
       >
         {restartMutation.isPending ? (
           <Loader2 className="w-4 h-4 animate-spin" />
@@ -375,7 +455,7 @@ export function CodexAccountsManager({
           />
           <Button
             onClick={() => captureMutation.mutate()}
-            disabled={captureMutation.isPending}
+            disabled={isAccountActionPending}
           >
             {captureMutation.isPending ? (
               <Loader2 className="w-4 h-4 animate-spin" />
@@ -416,6 +496,7 @@ export function CodexAccountsManager({
               switchingKey={
                 switchMutation.isPending ? switchMutation.variables : undefined
               }
+              actionsDisabled={isAccountActionPending}
               onSwitch={(accountKey) => switchMutation.mutate(accountKey)}
               renamingKey={
                 renameMutation.isPending
@@ -438,6 +519,7 @@ interface AccountRowProps {
   quota?: SubscriptionQuota;
   forecast?: CodexQuotaForecast;
   switchingKey?: string;
+  actionsDisabled?: boolean;
   onSwitch: (accountKey: string) => void;
   renamingKey?: string;
   onRename: (accountKey: string, profileName: string) => void;
@@ -454,6 +536,7 @@ function AccountRow({
   quota,
   forecast,
   switchingKey,
+  actionsDisabled = false,
   onSwitch,
   renamingKey,
   onRename,
@@ -467,6 +550,7 @@ function AccountRow({
   const tier5h = quota?.tiers.find((t) => t.name === "five_hour");
   const tier7d = quota?.tiers.find((t) => t.name === "seven_day");
   const saveRename = () => {
+    if (actionsDisabled || isRenaming) return;
     const profileName = draftName.trim();
     if (!profileName) return;
     onRename(account.accountKey, profileName);
@@ -611,7 +695,7 @@ function AccountRow({
                 size="icon"
                 className="h-9 w-9"
                 onClick={saveRename}
-                disabled={!draftName.trim() || isRenaming}
+                disabled={!draftName.trim() || actionsDisabled || isRenaming}
                 aria-label={t("codexAccounts.saveName", {
                   defaultValue: "保存名称",
                 })}
@@ -630,7 +714,7 @@ function AccountRow({
                   setDraftName(account.profileName);
                   setIsEditing(false);
                 }}
-                disabled={isRenaming}
+                disabled={actionsDisabled || isRenaming}
                 aria-label={t("common.cancel", { defaultValue: "取消" })}
               >
                 <X className="h-4 w-4" />
@@ -645,6 +729,7 @@ function AccountRow({
                 setDraftName(account.profileName);
                 setIsEditing(true);
               }}
+              disabled={actionsDisabled}
               aria-label={t("codexAccounts.renameAccount", {
                 defaultValue: "重命名账号",
               })}
@@ -654,7 +739,7 @@ function AccountRow({
           )}
           <Button
             size="sm"
-            disabled={account.isActive || isSwitching}
+            disabled={actionsDisabled || account.isActive || isSwitching}
             onClick={() => onSwitch(account.accountKey)}
             className="flex-1 sm:flex-none"
           >
@@ -667,7 +752,9 @@ function AccountRow({
             )}
             {account.isActive
               ? t("provider.inUse", { defaultValue: "使用中" })
-              : t("codexAccounts.switchTo", { defaultValue: "切换" })}
+              : t("codexAccounts.switchTo", {
+                  defaultValue: "切换并重启",
+                })}
           </Button>
         </div>
       </div>

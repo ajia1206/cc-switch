@@ -1573,6 +1573,10 @@ pub fn run() {
             commands::restore_db_backup,
             commands::rename_db_backup,
             commands::delete_db_backup,
+            commands::create_maka_llm_backup,
+            commands::list_maka_llm_backups,
+            commands::restore_maka_llm_backup,
+            commands::delete_maka_llm_backup,
             commands::sync_current_providers_live,
             // Deep link import
             commands::parse_deeplink,
@@ -1652,6 +1656,7 @@ pub fn run() {
             commands::get_usage_summary,
             commands::get_usage_summary_by_app,
             commands::get_tray_usage_overview,
+            commands::get_codex_session_insights,
             commands::get_usage_trends,
             commands::get_usage_activity_heatmap,
             commands::get_provider_stats,
@@ -1817,11 +1822,15 @@ pub fn run() {
             }
 
             log::info!("收到用户主动退出请求 (code={code:?})，开始清理...");
+            // ExitRequested 回调运行在 Tauri 主线程。窗口状态必须在这里同步保存：
+            // 如果把 save_window_state 放进下面的 Tokio 任务，它会先持有
+            // window-state 插件锁，再通过 dispatch_sync 回主线程读取窗口几何；
+            // 与主线程上的插件事件处理形成循环等待，表现为窗口消失但进程不退出。
+            save_window_state_before_exit(app_handle);
             api.prevent_exit();
 
             let app_handle = app_handle.clone();
             tauri::async_runtime::spawn(async move {
-                save_window_state_before_exit(&app_handle);
                 cleanup_before_exit(&app_handle).await;
                 // 先于 std::process::exit 显式移除托盘图标。
                 // 进程直接退出时 Tauri 运行时不走正常 Drop 流程，

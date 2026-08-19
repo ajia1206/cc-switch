@@ -6,6 +6,7 @@ import { useUsageSummaryByApp } from "@/lib/query/usage";
 import { cn } from "@/lib/utils";
 import { APP_ICON_MAP } from "@/config/appConfig";
 import type { AppId } from "@/lib/api/types";
+import { ProviderIcon } from "@/components/ProviderIcon";
 import { UsageActivityHeatmap } from "./UsageActivityHeatmap";
 import {
   Activity,
@@ -69,6 +70,22 @@ const TITLE_THEMES: Record<AppType | "all", TitleTheme> = {
   opencode: {
     accent: "text-purple-600 dark:text-purple-400",
     iconBg: "bg-purple-500/10",
+  },
+  maka: {
+    accent: "text-fuchsia-600 dark:text-fuchsia-400",
+    iconBg: "bg-fuchsia-500/10",
+  },
+  codepilot: {
+    accent: "text-indigo-600 dark:text-indigo-400",
+    iconBg: "bg-indigo-500/10",
+  },
+  deepseek_harness: {
+    accent: "text-blue-600 dark:text-blue-400",
+    iconBg: "bg-blue-500/10",
+  },
+  cindy: {
+    accent: "text-emerald-600 dark:text-emerald-400",
+    iconBg: "bg-emerald-500/10",
   },
 };
 
@@ -154,6 +171,16 @@ function AppGlyph({
   appType?: string;
   accentClass: string;
 }) {
+  if (appType === "deepseek_harness" || appType === "cindy") {
+    return (
+      <ProviderIcon
+        icon={appType === "cindy" ? "cindy" : "deepseek"}
+        name={appType === "cindy" ? "Cindy" : "DeepSeek Harness"}
+        size={20}
+        showFallback={appType === "cindy"}
+      />
+    );
+  }
   if (appType && appType in APP_ICON_MAP) {
     const base = APP_ICON_MAP[appType as AppId].icon;
     if (isValidElement<{ size?: number }>(base)) {

@@ -150,10 +150,12 @@ struct AccountPaths {
 
 pub fn list_accounts() -> Result<Vec<CodexAccountSummary>, AppError> {
     let registry = read_registry_with_snapshot_scan()?;
+    let active_account_key =
+        live_account_key().filter(|key| registry.items.iter().any(|item| item.account_key == *key));
     Ok(registry
         .items
         .iter()
-        .map(|item| to_summary(item, registry.active_account_key.as_deref()))
+        .map(|item| to_summary(item, active_account_key.as_deref()))
         .collect())
 }
 
@@ -674,6 +676,13 @@ fn live_auth_matches_account(item: &RegistryItem) -> bool {
         .unwrap_or(false)
 }
 
+fn live_account_key() -> Option<String> {
+    let auth_path = get_codex_auth_path();
+    validate_auth_file(&auth_path).ok()?;
+    let auth: AuthSnapshot = read_json_file(&auth_path).ok()?;
+    Some(account_key_from_auth(&auth))
+}
+
 fn backup_current_auth(previous_account_key: Option<&str>) -> Result<PathBuf, AppError> {
     let paths = account_paths();
     fs::create_dir_all(&paths.backups_dir).map_err(|e| AppError::io(&paths.backups_dir, e))?;
@@ -979,14 +988,66 @@ pub async fn get_all_account_quotas(
 }
 
 #[cfg(target_os = "macos")]
+const CODEX_BUNDLE_ID: &str = "com.openai.codex";
+
+#[cfg(target_os = "macos")]
+const CODEX_APP_NAME: &str = "Codex";
+
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CodexMacAppCandidate {
+    app_path: &'static str,
+    process_pattern: &'static str,
+}
+
+#[cfg(target_os = "macos")]
+const CODEX_MAC_APP_CANDIDATES: [CodexMacAppCandidate; 2] = [
+    CodexMacAppCandidate {
+        app_path: "/Applications/ChatGPT.app",
+        process_pattern: "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT",
+    },
+    CodexMacAppCandidate {
+        app_path: "/Applications/Codex.app",
+        process_pattern: "/Applications/Codex.app/Contents/MacOS/Codex",
+    },
+];
+
+#[cfg(target_os = "macos")]
+fn select_codex_mac_app_candidate_with<F>(exists: F) -> Option<CodexMacAppCandidate>
+where
+    F: Fn(&Path) -> bool,
+{
+    CODEX_MAC_APP_CANDIDATES
+        .iter()
+        .copied()
+        .find(|candidate| exists(Path::new(candidate.app_path)))
+}
+
+#[cfg(target_os = "macos")]
+fn select_codex_mac_app_candidate() -> Option<CodexMacAppCandidate> {
+    select_codex_mac_app_candidate_with(Path::exists)
+}
+
+#[cfg(target_os = "macos")]
+fn parse_main_process_ids(ps_output: &str, process_path: &str) -> Vec<u32> {
+    ps_output
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim_start();
+            let split_at = line.find(char::is_whitespace)?;
+            let pid = line[..split_at].parse::<u32>().ok()?;
+            let command = line[split_at..].trim_start();
+            (command == process_path || command.starts_with(&format!("{process_path} ")))
+                .then_some(pid)
+        })
+        .collect()
+}
+
+#[cfg(target_os = "macos")]
 fn restart_codex_app_impl() -> Result<CodexAppRestartResult, AppError> {
     use std::process::Command;
     use std::thread;
     use std::time::{Duration, Instant};
-
-    const CODEX_APP_NAME: &str = "Codex";
-    const CODEX_BUNDLE_ID: &str = "com.openai.codex";
-    const CODEX_MAIN_PROCESS_PATTERN: &str = "/Codex.app/Contents/MacOS/Codex";
 
     fn osascript(script: &str) -> Result<String, AppError> {
         let output = Command::new("osascript")
@@ -1016,7 +1077,40 @@ fn restart_codex_app_impl() -> Result<CodexAppRestartResult, AppError> {
             })
     }
 
-    fn is_codex_running() -> bool {
+    fn main_process_ids(process_path: &str) -> Result<Vec<u32>, AppError> {
+        let output = Command::new("ps")
+            .args(["-axo", "pid=,command="])
+            .output()
+            .map_err(|e| AppError::Message(format!("Failed to inspect Codex processes: {e}")))?;
+        if !output.status.success() {
+            return Err(AppError::Message(
+                "Failed to inspect Codex processes.".to_string(),
+            ));
+        }
+        Ok(parse_main_process_ids(
+            &String::from_utf8_lossy(&output.stdout),
+            process_path,
+        ))
+    }
+
+    fn is_process_running(process_path: &str) -> Option<bool> {
+        main_process_ids(process_path)
+            .ok()
+            .map(|process_ids| !process_ids.is_empty())
+    }
+
+    fn is_codex_running(selected: Option<CodexMacAppCandidate>) -> bool {
+        if selected.and_then(|candidate| is_process_running(candidate.process_pattern))
+            == Some(true)
+        {
+            return true;
+        }
+        if CODEX_MAC_APP_CANDIDATES
+            .iter()
+            .any(|candidate| is_process_running(candidate.process_pattern) == Some(true))
+        {
+            return true;
+        }
         is_running_by_script(&format!("application id \"{CODEX_BUNDLE_ID}\" is running"))
             .or_else(|| {
                 is_running_by_script(&format!("application \"{CODEX_APP_NAME}\" is running"))
@@ -1024,10 +1118,14 @@ fn restart_codex_app_impl() -> Result<CodexAppRestartResult, AppError> {
             .unwrap_or(false)
     }
 
-    fn wait_until_running(expected: bool, timeout: Duration) -> bool {
+    fn wait_until_running(
+        expected: bool,
+        timeout: Duration,
+        selected: Option<CodexMacAppCandidate>,
+    ) -> bool {
         let deadline = Instant::now() + timeout;
         loop {
-            if is_codex_running() == expected {
+            if is_codex_running(selected) == expected {
                 return true;
             }
             if Instant::now() >= deadline {
@@ -1037,26 +1135,58 @@ fn restart_codex_app_impl() -> Result<CodexAppRestartResult, AppError> {
         }
     }
 
-    fn request_quit() -> Result<(), AppError> {
-        osascript(&format!(
-            "tell application id \"{CODEX_BUNDLE_ID}\" to quit"
-        ))
-        .or_else(|_| osascript(&format!("tell application \"{CODEX_APP_NAME}\" to quit")))
-        .map(|_| ())
-        .map_err(|e| AppError::Message(format!("Failed to quit Codex: {e}")))
+    fn request_quit(selected: Option<CodexMacAppCandidate>) -> Result<(), AppError> {
+        let quit_result = if let Some(candidate) = selected {
+            osascript(&format!(
+                "tell application \"{}\" to quit",
+                candidate.app_path
+            ))
+            .or_else(|_| {
+                osascript(&format!(
+                    "tell application id \"{CODEX_BUNDLE_ID}\" to quit"
+                ))
+            })
+        } else {
+            osascript(&format!(
+                "tell application id \"{CODEX_BUNDLE_ID}\" to quit"
+            ))
+        };
+        quit_result
+            .or_else(|_| osascript(&format!("tell application \"{CODEX_APP_NAME}\" to quit")))
+            .map(|_| ())
+            .map_err(|e| AppError::Message(format!("Failed to quit Codex: {e}")))
     }
 
     fn terminate_main_process() -> Result<bool, AppError> {
-        let status = Command::new("pkill")
-            .args(["-TERM", "-f", CODEX_MAIN_PROCESS_PATTERN])
-            .status()
-            .map_err(|e| AppError::Message(format!("Failed to terminate Codex: {e}")))?;
-
-        // pkill returns 1 when no process matched. Treat that as "nothing to do".
-        Ok(status.success() || status.code() == Some(1))
+        let mut terminated = false;
+        for candidate in CODEX_MAC_APP_CANDIDATES {
+            for pid in main_process_ids(candidate.process_pattern)? {
+                let status = Command::new("kill")
+                    .args(["-TERM", &pid.to_string()])
+                    .status()
+                    .map_err(|e| AppError::Message(format!("Failed to terminate Codex: {e}")))?;
+                if !status.success() {
+                    return Err(AppError::Message(format!(
+                        "Failed to terminate Codex process {pid}: {status}"
+                    )));
+                }
+                terminated = true;
+            }
+        }
+        Ok(terminated)
     }
 
-    fn open_codex() -> Result<String, AppError> {
+    fn open_codex(selected: Option<CodexMacAppCandidate>) -> Result<String, AppError> {
+        if let Some(candidate) = selected {
+            let app_status = Command::new("open")
+                .arg(candidate.app_path)
+                .status()
+                .map_err(|e| AppError::Message(format!("Failed to open Codex by app path: {e}")))?;
+            if app_status.success() {
+                return Ok(format!("appPath:{}", candidate.app_path));
+            }
+        }
+
         let bundle_status = Command::new("open")
             .args(["-b", CODEX_BUNDLE_ID])
             .status()
@@ -1080,19 +1210,20 @@ fn restart_codex_app_impl() -> Result<CodexAppRestartResult, AppError> {
         }
     }
 
-    let was_running = is_codex_running();
+    let selected = select_codex_mac_app_candidate();
+    let was_running = is_codex_running(selected);
     let mut quit_requested = false;
     let mut quit_graceful = !was_running;
     let mut force_quit_used = false;
 
     if was_running {
         quit_requested = true;
-        request_quit()?;
-        quit_graceful = wait_until_running(false, Duration::from_secs(8));
+        request_quit(selected)?;
+        quit_graceful = wait_until_running(false, Duration::from_secs(8), selected);
 
         if !quit_graceful {
             force_quit_used = terminate_main_process()?;
-            if !wait_until_running(false, Duration::from_secs(4)) {
+            if !wait_until_running(false, Duration::from_secs(4), selected) {
                 return Err(AppError::Message(
                     "Codex did not exit completely. Please close it manually and try again."
                         .to_string(),
@@ -1101,8 +1232,8 @@ fn restart_codex_app_impl() -> Result<CodexAppRestartResult, AppError> {
         }
     }
 
-    let launch_method = open_codex()?;
-    let running_after = wait_until_running(true, Duration::from_secs(10));
+    let launch_method = open_codex(selected)?;
+    let running_after = wait_until_running(true, Duration::from_secs(10), selected);
     if !running_after {
         return Err(AppError::Message(
             "Codex open command succeeded, but the app was not detected as running.".to_string(),
@@ -1142,6 +1273,39 @@ mod tests {
     use serde_json::json;
     use serial_test::serial;
     use tempfile::TempDir;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_app_selection_prefers_chatgpt_and_keeps_legacy_fallback() {
+        let preferred = select_codex_mac_app_candidate_with(|_| true).unwrap();
+        assert_eq!(preferred.app_path, "/Applications/ChatGPT.app");
+        assert_eq!(
+            preferred.process_pattern,
+            "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT"
+        );
+
+        let legacy = select_codex_mac_app_candidate_with(|path| {
+            path == Path::new("/Applications/Codex.app")
+        })
+        .unwrap();
+        assert_eq!(legacy.app_path, "/Applications/Codex.app");
+        assert_eq!(
+            legacy.process_pattern,
+            "/Applications/Codex.app/Contents/MacOS/Codex"
+        );
+
+        let ps_output = "  42 /Applications/ChatGPT.app/Contents/MacOS/ChatGPT\n\
+                         43 /Applications/ChatGPT.app/Contents/Frameworks/Codex (Renderer)\n\
+                         44 /Applications/Codex.app/Contents/MacOS/Codex --flag\n";
+        assert_eq!(
+            parse_main_process_ids(ps_output, preferred.process_pattern),
+            vec![42]
+        );
+        assert_eq!(
+            parse_main_process_ids(ps_output, legacy.process_pattern),
+            vec![44]
+        );
+    }
 
     struct TestHomeGuard {
         _temp: TempDir,
@@ -1269,6 +1433,114 @@ mod tests {
             err.to_string().contains("proxy placeholder"),
             "unexpected error: {err}"
         );
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn switches_bidirectionally_between_chatgpt_and_api_key() -> Result<(), AppError> {
+        let _home = TestHomeGuard::new();
+        let paths = account_paths();
+        std::fs::create_dir_all(&paths.snapshots_dir)
+            .map_err(|e| AppError::io(&paths.snapshots_dir, e))?;
+
+        let chatgpt_payload = URL_SAFE_NO_PAD.encode(
+            serde_json::to_vec(&json!({
+                "email": "login@example.com",
+                "https://api.openai.com/auth": {
+                    "chatgpt_user_id": "user-login",
+                    "organizations": [{ "id": "org-login", "is_default": true }]
+                }
+            }))
+            .unwrap(),
+        );
+        let chatgpt_auth = AuthSnapshot {
+            auth_mode: Some("chatgpt".to_string()),
+            tokens: Some(json!({
+                "id_token": format!("header.{chatgpt_payload}.sig"),
+                "account_id": "workspace-login"
+            })),
+            openai_api_key: None,
+        };
+        let chatgpt_key = account_key_from_auth(&chatgpt_auth);
+        let chatgpt_snapshot = paths.snapshots_dir.join("chatgpt.json");
+        write_json_file(&chatgpt_snapshot, &chatgpt_auth)?;
+
+        let api_auth = AuthSnapshot {
+            auth_mode: Some("apikey".to_string()),
+            tokens: None,
+            openai_api_key: Some(json!("sk-api-account")),
+        };
+        let api_key = account_key_from_auth(&api_auth);
+        let api_snapshot = paths.snapshots_dir.join("api-key.json");
+        write_json_file(&api_snapshot, &api_auth)?;
+
+        let registry = Registry {
+            schema_version: 2,
+            updated_at: now_seconds(),
+            active_account_key: Some(chatgpt_key.clone()),
+            items: vec![
+                RegistryItem {
+                    account_key: chatgpt_key.clone(),
+                    snapshot_path: chatgpt_snapshot.to_string_lossy().to_string(),
+                    email: "login@example.com".to_string(),
+                    alias: String::new(),
+                    account_name: String::new(),
+                    workspace_name: String::new(),
+                    profile_name: "Login Account".to_string(),
+                    plan: "plus".to_string(),
+                    auth_mode: "chatgpt".to_string(),
+                    last_used_at: None,
+                    extra: Map::new(),
+                },
+                RegistryItem {
+                    account_key: api_key.clone(),
+                    snapshot_path: api_snapshot.to_string_lossy().to_string(),
+                    email: String::new(),
+                    alias: String::new(),
+                    account_name: String::new(),
+                    workspace_name: String::new(),
+                    profile_name: "API Account".to_string(),
+                    plan: String::new(),
+                    auth_mode: "apikey".to_string(),
+                    last_used_at: None,
+                    extra: Map::new(),
+                },
+            ],
+            extra: Map::new(),
+        };
+        write_registry(&registry)?;
+
+        let auth_path = get_codex_auth_path();
+        if let Some(parent) = auth_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
+        }
+        write_json_file(&auth_path, &chatgpt_auth)?;
+
+        let initial = list_accounts()?;
+        assert!(initial.iter().any(|item| {
+            item.account_key == chatgpt_key && item.auth_mode == "chatgpt" && item.is_active
+        }));
+
+        let to_api = switch_account(api_key.clone())?;
+        assert_eq!(to_api.active_account_key, api_key);
+        let live_api: AuthSnapshot = read_json_file(&auth_path)?;
+        assert_eq!(live_api.auth_mode.as_deref(), Some("apikey"));
+        assert_eq!(live_api.openai_api_key, Some(json!("sk-api-account")));
+        let after_api = list_accounts()?;
+        assert!(after_api.iter().any(|item| {
+            item.account_key == api_key && item.auth_mode == "apikey" && item.is_active
+        }));
+
+        let to_login = switch_account(chatgpt_key.clone())?;
+        assert_eq!(to_login.active_account_key, chatgpt_key);
+        let live_chatgpt: AuthSnapshot = read_json_file(&auth_path)?;
+        assert_eq!(live_chatgpt.auth_mode.as_deref(), Some("chatgpt"));
+        assert_eq!(account_key_from_auth(&live_chatgpt), chatgpt_key);
+        let after_login = list_accounts()?;
+        assert!(after_login.iter().any(|item| {
+            item.account_key == chatgpt_key && item.auth_mode == "chatgpt" && item.is_active
+        }));
         Ok(())
     }
 
@@ -1449,6 +1721,13 @@ mod tests {
             },
         )?;
 
+        let before_switch = list_accounts()?;
+        assert_eq!(before_switch.len(), 1);
+        assert!(
+            !before_switch[0].is_active,
+            "registry state must not mark an account active when live auth has drifted"
+        );
+
         let result = switch_account(target_key.clone())?;
         assert_eq!(result.active_account_key, target_key);
         assert!(result.restart_recommended);
@@ -1458,6 +1737,9 @@ mod tests {
         );
         let restored: AuthSnapshot = read_json_file(&auth_path)?;
         assert_eq!(restored.openai_api_key, Some(json!("sk-target")));
+
+        let after_switch = list_accounts()?;
+        assert!(after_switch[0].is_active);
 
         registry = read_registry()?;
         assert_eq!(

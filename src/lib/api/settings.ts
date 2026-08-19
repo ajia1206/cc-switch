@@ -346,6 +346,23 @@ export interface BackupEntry {
   createdAt: string;
 }
 
+export interface MakaLlmBackupEntry {
+  filename: string;
+  sizeBytes: number;
+  createdAt: string;
+  backupType: "manual" | "safety";
+  connectionCount: number;
+  credentialCount: number;
+  includesCredentials: boolean;
+}
+
+export interface MakaLlmRestoreResult {
+  safetyBackupFilename: string | null;
+  connectionCount: number;
+  credentialCount: number;
+  includesCredentials: boolean;
+}
+
 export const backupsApi = {
   async createDbBackup(): Promise<string> {
     return await invoke("create_db_backup");
@@ -365,5 +382,21 @@ export const backupsApi = {
 
   async deleteDbBackup(filename: string): Promise<void> {
     await invoke("delete_db_backup", { filename });
+  },
+
+  async createMakaLlmBackup(): Promise<MakaLlmBackupEntry> {
+    return await invoke("create_maka_llm_backup");
+  },
+
+  async listMakaLlmBackups(): Promise<MakaLlmBackupEntry[]> {
+    return await invoke("list_maka_llm_backups");
+  },
+
+  async restoreMakaLlmBackup(filename: string): Promise<MakaLlmRestoreResult> {
+    return await invoke("restore_maka_llm_backup", { filename });
+  },
+
+  async deleteMakaLlmBackup(filename: string): Promise<void> {
+    await invoke("delete_maka_llm_backup", { filename });
   },
 };

@@ -864,8 +864,8 @@ fn schema_seeds_gpt_5_6_family_pricing() {
 
     for (model_id, expected) in [
         ("gpt-5.6-sol", ("5", "30", "0.50", "6.25")),
-        ("gpt-5.6-terra", ("2.50", "15", "0.25", "3.125")),
-        ("gpt-5.6-luna", ("1", "6", "0.10", "1.25")),
+        ("gpt-5.6-terra", ("2", "12", "0.20", "2.50")),
+        ("gpt-5.6-luna", ("0.20", "1.20", "0.02", "0.25")),
     ] {
         let actual: (String, String, String, String) = conn
             .query_row(

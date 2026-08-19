@@ -43,6 +43,7 @@ export interface SessionSyncResult {
   suspectedDuplicates: number;
   deferredFiles: number;
   errors: string[];
+  dataChanged: boolean;
 }
 
 export interface DataSourceSummary {
@@ -144,6 +145,33 @@ export interface TrayUsageOverview {
   trends: DailyStats[];
 }
 
+export interface PercentileStats {
+  p50?: number;
+  p95?: number;
+  p99?: number;
+  max?: number;
+}
+
+export interface NamedCount {
+  name: string;
+  count: number;
+}
+
+export interface CodexSessionInsights {
+  completedTurns: number;
+  sessionCount: number;
+  modelRequests: number;
+  callsPerTurn: number;
+  rpm: number;
+  tpm: number;
+  cacheHitRate: number;
+  weightedEffectiveTps?: number;
+  ttftMs: PercentileStats;
+  totalLatencyMs: PercentileStats;
+  mcpCalls: NamedCount[];
+  skillCalls: NamedCount[];
+}
+
 export interface LogFilters {
   appType?: string;
   providerName?: string;
@@ -200,10 +228,20 @@ export interface UsageRangeSelection {
  * only ever show a partial number and mislead users into reading it as the
  * Desktop's full usage. The backend collapses `claude-desktop → claude` in
  * every dashboard query (see `folded_app_type_sql`).
- * `opencode` / `openclaw` / `hermes` have no proxy handler at all — they
- * appear only as managed apps elsewhere.
+ * `opencode` / `maka` / `codepilot` / `deepseek_harness` / `cindy` have no
+ * proxy handler at all. Their rows come from read-only local usage importers
+ * rather than route takeover.
  */
-export type AppType = "claude" | "codex" | "gemini" | "grokbuild" | "opencode";
+export type AppType =
+  | "claude"
+  | "codex"
+  | "gemini"
+  | "grokbuild"
+  | "opencode"
+  | "maka"
+  | "codepilot"
+  | "deepseek_harness"
+  | "cindy";
 
 export type AppTypeFilter = "all" | AppType;
 
@@ -213,6 +251,10 @@ export const KNOWN_APP_TYPES: ReadonlyArray<AppType> = [
   "gemini",
   "grokbuild",
   "opencode",
+  "maka",
+  "codepilot",
+  "deepseek_harness",
+  "cindy",
 ];
 
 /**

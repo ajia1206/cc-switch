@@ -35,6 +35,8 @@ pub struct SessionSyncResult {
     pub suspected_duplicates: u32,
     pub deferred_files: u32,
     pub errors: Vec<String>,
+    /// True when a source replacement changed stored usage even if it imported zero rows.
+    pub data_changed: bool,
 }
 
 impl SessionSyncResult {
@@ -46,6 +48,7 @@ impl SessionSyncResult {
             .suspected_duplicates
             .saturating_add(other.suspected_duplicates);
         self.deferred_files = self.deferred_files.saturating_add(other.deferred_files);
+        self.data_changed |= other.data_changed;
         self.errors.extend(other.errors);
     }
 }
@@ -88,6 +91,26 @@ pub fn sync_all_unlocked(db: &Database) -> SessionSyncResult {
     );
     merge_sync_step(
         &mut result,
+        "Maka",
+        crate::services::session_usage_desktop::sync_maka_usage(db),
+    );
+    merge_sync_step(
+        &mut result,
+        "CodePilot",
+        crate::services::session_usage_desktop::sync_codepilot_usage(db),
+    );
+    merge_sync_step(
+        &mut result,
+        "DeepSeek Harness",
+        crate::services::session_usage_desktop::sync_deepseek_harness_usage(db),
+    );
+    merge_sync_step(
+        &mut result,
+        "Cindy",
+        crate::services::session_usage_desktop::sync_cindy_usage(db),
+    );
+    merge_sync_step(
+        &mut result,
         "Grok Build",
         crate::services::session_usage_grokbuild::sync_grokbuild_usage(db),
     );
@@ -96,7 +119,7 @@ pub fn sync_all_unlocked(db: &Database) -> SessionSyncResult {
 }
 
 pub(crate) fn notify_sync_result(result: &SessionSyncResult) {
-    if result.imported > 0 {
+    if result.imported > 0 || result.data_changed {
         crate::usage_events::notify_log_recorded();
     }
 }
@@ -135,6 +158,7 @@ pub fn sync_claude_session_logs(db: &Database) -> Result<SessionSyncResult, AppE
             suspected_duplicates: 0,
             deferred_files: 0,
             errors: vec![],
+            data_changed: false,
         });
     }
 
@@ -145,6 +169,7 @@ pub fn sync_claude_session_logs(db: &Database) -> Result<SessionSyncResult, AppE
         suspected_duplicates: 0,
         deferred_files: 0,
         errors: vec![],
+        data_changed: false,
     };
 
     // 收集所有 .jsonl 文件

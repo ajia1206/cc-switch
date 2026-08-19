@@ -119,6 +119,21 @@ describe("UsageDashboard", () => {
     expect(screen.getByTestId("select-5000")).toBeInTheDocument();
   });
 
+  it("shows desktop agents as first-class usage filters", () => {
+    renderDashboard();
+
+    expect(
+      screen.getByRole("button", {
+        name: "usage.appFilter.deepseek_harness",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", {
+        name: "usage.appFilter.cindy",
+      }),
+    ).toBeInTheDocument();
+  });
+
   it("persists refresh interval changes", async () => {
     const onRefreshIntervalChange = vi.fn().mockResolvedValue(true);
     renderDashboard({ onRefreshIntervalChange });

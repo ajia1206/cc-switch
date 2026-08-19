@@ -92,6 +92,38 @@ const INTENSITY_CLASSES: Record<
     4: "border-violet-500/30 bg-violet-500/75",
     5: "border-violet-500/40 bg-violet-600",
   },
+  maka: {
+    0: "border-border/50 bg-muted/50",
+    1: "border-fuchsia-500/15 bg-fuchsia-500/20",
+    2: "border-fuchsia-500/20 bg-fuchsia-500/35",
+    3: "border-fuchsia-500/25 bg-fuchsia-500/55",
+    4: "border-fuchsia-500/30 bg-fuchsia-500/75",
+    5: "border-fuchsia-500/40 bg-fuchsia-600",
+  },
+  codepilot: {
+    0: "border-border/50 bg-muted/50",
+    1: "border-indigo-500/15 bg-indigo-500/20",
+    2: "border-indigo-500/20 bg-indigo-500/35",
+    3: "border-indigo-500/25 bg-indigo-500/55",
+    4: "border-indigo-500/30 bg-indigo-500/75",
+    5: "border-indigo-500/40 bg-indigo-600",
+  },
+  deepseek_harness: {
+    0: "border-border/50 bg-muted/50",
+    1: "border-blue-500/15 bg-blue-500/20",
+    2: "border-blue-500/20 bg-blue-500/35",
+    3: "border-blue-500/25 bg-blue-500/55",
+    4: "border-blue-500/30 bg-blue-500/75",
+    5: "border-blue-500/40 bg-blue-600",
+  },
+  cindy: {
+    0: "border-border/50 bg-muted/50",
+    1: "border-emerald-500/15 bg-emerald-500/20",
+    2: "border-emerald-500/20 bg-emerald-500/35",
+    3: "border-emerald-500/25 bg-emerald-500/55",
+    4: "border-emerald-500/30 bg-emerald-500/75",
+    5: "border-emerald-500/40 bg-emerald-600",
+  },
 };
 
 function getFilterType(appType?: string): AppType | "all" {
@@ -100,7 +132,11 @@ function getFilterType(appType?: string): AppType | "all" {
     appType === "codex" ||
     appType === "gemini" ||
     appType === "grokbuild" ||
-    appType === "opencode"
+    appType === "opencode" ||
+    appType === "maka" ||
+    appType === "codepilot" ||
+    appType === "deepseek_harness" ||
+    appType === "cindy"
   ) {
     return appType;
   }

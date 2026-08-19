@@ -3,23 +3,32 @@ import { useTranslation } from "react-i18next";
 import { keepPreviousData, useQueryClient } from "@tanstack/react-query";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
-  Activity,
   BarChart3,
-  CheckCircle2,
+  Clock3,
   Database,
+  Gauge,
   Palette,
   PanelsTopLeft,
   RefreshCw,
-  Server,
+  Sparkles,
+  Timer,
+  Wrench,
   X,
 } from "lucide-react";
 import { APP_ICON_MAP } from "@/config/appConfig";
 import { Button } from "@/components/ui/button";
 import { useUsageEventBridge } from "@/hooks/useUsageEventBridge";
-import { usageKeys, useTrayUsageOverview } from "@/lib/query/usage";
+import {
+  usageKeys,
+  useCodexSessionInsights,
+  useTrayUsageOverview,
+  useUsageActivityHeatmap,
+} from "@/lib/query/usage";
 import { cn } from "@/lib/utils";
 import type {
   DailyStats,
+  NamedCount,
+  UsageActivityDay,
   UsageRangeSelection,
   UsageSummary,
 } from "@/types/usage";
@@ -61,13 +70,13 @@ const TRAY_THEME_OPTIONS: Array<{
   {
     value: "native",
     labelKey: "usage.trayPanel.themeNative",
-    fallback: "Native",
+    fallback: "Light",
     icon: <PanelsTopLeft className="h-3.5 w-3.5" />,
   },
   {
     value: "card",
     labelKey: "usage.trayPanel.themeCard",
-    fallback: "Card",
+    fallback: "Dark",
     icon: <Palette className="h-3.5 w-3.5" />,
   },
 ];
@@ -154,6 +163,18 @@ function formatPercent(value: number, scale: "unit" | "percent" = "percent") {
   const pct = scale === "unit" ? value * 100 : value;
   if (!Number.isFinite(pct)) return "--";
   return `${Math.round(pct)}%`;
+}
+
+function formatDurationMs(value: number | undefined) {
+  if (value == null || !Number.isFinite(value)) return "--";
+  if (value < 1_000) return `${Math.round(value)}ms`;
+  if (value < 60_000) return `${(value / 1_000).toFixed(1)}s`;
+  return `${(value / 60_000).toFixed(1)}m`;
+}
+
+function formatRate(value: number | undefined, digits = 1) {
+  if (value == null || !Number.isFinite(value)) return "--";
+  return value.toLocaleString(undefined, { maximumFractionDigits: digits });
 }
 
 function parseTrendDate(date: string) {
@@ -268,6 +289,17 @@ export function TrayUsagePanel() {
     {},
     queryOptions,
   );
+  const { data: sessionInsights, isLoading: isInsightsLoading } =
+    useCodexSessionInsights(range, {
+      placeholderData: keepPreviousData,
+      refetchInterval: 60000,
+      refetchIntervalInBackground: true,
+    });
+  const { data: activityDays } = useUsageActivityHeatmap(undefined, {
+    placeholderData: keepPreviousData,
+    refetchInterval: 60000,
+    refetchIntervalInBackground: true,
+  });
 
   const apps = overview?.summaryByApp ?? [];
   const providers = overview?.providers;
@@ -292,6 +324,18 @@ export function TrayUsagePanel() {
     .slice()
     .sort((a, b) => b.totalTokens - a.totalTokens)
     .slice(0, 5);
+  const topMcpCalls = sessionInsights?.mcpCalls.slice(0, 4) ?? [];
+  const topSkillCalls = sessionInsights?.skillCalls.slice(0, 4) ?? [];
+  const totalMcpCalls =
+    sessionInsights?.mcpCalls.reduce((sum, item) => sum + item.count, 0) ?? 0;
+  const totalSkillCalls =
+    sessionInsights?.skillCalls.reduce((sum, item) => sum + item.count, 0) ?? 0;
+  const activeRange = RANGE_OPTIONS.find(
+    (option) => option.value === rangePreset,
+  );
+  const activeRangeLabel = activeRange
+    ? t(activeRange.labelKey, activeRange.fallback)
+    : "";
 
   const tokenSegments = [
     {
@@ -340,40 +384,38 @@ export function TrayUsagePanel() {
   };
 
   return (
-    <div className="h-screen overflow-hidden bg-transparent p-2 text-foreground">
+    <div
+      className={cn(
+        "h-screen overflow-hidden bg-transparent p-1.5 text-foreground",
+        isCardTheme && "dark",
+      )}
+    >
       <section
         className={cn(
-          "flex h-full flex-col overflow-hidden shadow-2xl",
+          "flex h-full flex-col overflow-hidden rounded-[18px] border shadow-[0_22px_70px_rgba(0,0,0,0.28)] backdrop-blur-xl",
           isCardTheme
-            ? "rounded-[16px] border-2 border-slate-800 bg-[#fff9ed] dark:border-slate-200 dark:bg-slate-950"
-            : "rounded-[14px] border border-border/70 bg-background",
+            ? "border-slate-200/80 bg-[#f6f7f5] dark:border-white/10 dark:bg-[#101412]"
+            : "border-border/60 bg-background/95",
         )}
-        style={
-          isCardTheme
-            ? {
-                backgroundImage:
-                  "radial-gradient(circle at 10px 10px, rgba(15, 23, 42, 0.08) 1px, transparent 1.5px)",
-                backgroundSize: "16px 16px",
-              }
-            : undefined
-        }
       >
         <header
           data-tauri-drag-region
           className={cn(
-            "flex shrink-0 items-center justify-between px-3.5 py-3",
+            "flex shrink-0 items-center justify-between px-4 py-3",
             isCardTheme
-              ? "border-b-2 border-slate-800 bg-[#fffaf2]/90 dark:border-slate-200 dark:bg-slate-950/90"
-              : "border-b border-border/70",
+              ? "border-b border-slate-200/80 bg-white/55 dark:border-white/10 dark:bg-white/[0.025]"
+              : "border-b border-border/60",
           )}
         >
           <div className="flex min-w-0 items-center gap-2">
-            <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-emerald-500/25 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
-              <BarChart3 className="h-4 w-4" />
+            <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-emerald-500 text-white shadow-[0_5px_14px_rgba(16,185,129,0.28)] dark:bg-emerald-400 dark:text-[#0b1712]">
+              <BarChart3 className="h-3.5 w-3.5" strokeWidth={2.2} />
             </span>
             <div className="min-w-0">
-              <div className="truncate text-sm font-semibold">CC Switch</div>
-              <div className="truncate text-[10px] text-muted-foreground">
+              <div className="truncate text-[13px] font-semibold tracking-[-0.01em]">
+                CC Switch
+              </div>
+              <div className="truncate text-[9px] uppercase tracking-[0.14em] text-muted-foreground">
                 {t("usage.trayPanel.title", "Usage")}
               </div>
             </div>
@@ -382,10 +424,10 @@ export function TrayUsagePanel() {
           <div className="flex items-center gap-1.5" data-tauri-no-drag>
             <div
               className={cn(
-                "flex h-7 rounded-md p-0.5",
+                "flex h-7 rounded-lg bg-muted/55 p-0.5",
                 isCardTheme
-                  ? "border-2 border-slate-800 bg-white shadow-[2px_2px_0_#cbd5e1] dark:border-slate-200 dark:bg-slate-900"
-                  : "border border-border/70 bg-muted/40",
+                  ? "ring-1 ring-slate-200/80 dark:bg-white/[0.055] dark:ring-white/10"
+                  : "ring-1 ring-border/50",
               )}
             >
               {RANGE_OPTIONS.map((option) => (
@@ -401,13 +443,13 @@ export function TrayUsagePanel() {
                   }}
                   onClick={() => selectRangePreset(option.value)}
                   className={cn(
-                    "min-w-9 rounded px-2 text-[11px] font-medium transition-colors",
+                    "min-w-9 rounded-md px-2 text-[10px] font-semibold transition-colors",
                     selectedRangePreset === option.value
                       ? isCardTheme
-                        ? "bg-amber-200 text-slate-950"
-                        : "bg-background text-foreground shadow-sm"
+                        ? "bg-slate-900 text-white shadow-sm dark:bg-emerald-400 dark:text-[#0b1712]"
+                        : "bg-foreground text-background shadow-sm"
                       : isCardTheme
-                        ? "text-slate-500 hover:bg-amber-100 hover:text-slate-950 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-100"
+                        ? "text-slate-500 hover:text-slate-950 dark:text-slate-400 dark:hover:text-white"
                         : "text-muted-foreground hover:text-foreground",
                   )}
                 >
@@ -448,17 +490,17 @@ export function TrayUsagePanel() {
 
         <div
           ref={scrollRef}
-          className="min-h-0 flex-1 overflow-y-auto px-4 py-3.5"
+          className="min-h-0 flex-1 overflow-y-auto px-4 pb-5 pt-4"
         >
-          <div className="space-y-3.5">
-            <section>
+          <div className="space-y-4">
+            <section className="pb-0.5">
               <div className="flex items-end justify-between gap-3">
                 <div className="min-w-0">
-                  <div className="text-[10px] font-medium uppercase text-muted-foreground">
+                  <div className="text-[9px] font-semibold uppercase tracking-[0.15em] text-muted-foreground">
                     {t("usage.realTotal", "Tokens Processed")}
                   </div>
                   <div
-                    className="mt-1 truncate text-[32px] font-semibold tabular-nums leading-none"
+                    className="mt-1.5 truncate font-mono text-[36px] font-semibold tracking-[-0.055em] tabular-nums leading-none"
                     title={summary.realTotalTokens.toLocaleString()}
                   >
                     {isLoading
@@ -467,22 +509,22 @@ export function TrayUsagePanel() {
                   </div>
                 </div>
                 <div className="shrink-0 text-right">
-                  <div className="text-[10px] font-medium text-muted-foreground">
+                  <div className="text-[9px] font-semibold uppercase tracking-[0.15em] text-muted-foreground">
                     {t("usage.cost", "Cost")}
                   </div>
-                  <div className="mt-1 text-lg font-semibold tabular-nums text-emerald-600 dark:text-emerald-400">
+                  <div className="mt-1.5 font-mono text-[19px] font-semibold tracking-[-0.03em] tabular-nums text-emerald-600 dark:text-emerald-400">
                     {isLoading ? "--" : formatUsdAuto(totalCost)}
                   </div>
                 </div>
               </div>
 
-              <div className="mt-3">
+              <div className="mt-4">
                 <TokenSplitBar
                   segments={tokenSegments}
                   total={totalBreakdown}
                   theme={visualTheme}
                 />
-                <div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1.5">
+                <div className="mt-2.5 grid grid-cols-2 gap-x-5 gap-y-1.5">
                   {tokenSegments.map((segment) => (
                     <TokenLegend
                       key={segment.label}
@@ -496,38 +538,33 @@ export function TrayUsagePanel() {
               </div>
             </section>
 
-            <div className="grid grid-cols-2 gap-2">
+            <div
+              className={cn(
+                "grid grid-cols-4 divide-x overflow-hidden rounded-lg py-2.5",
+                isCardTheme
+                  ? "divide-slate-200 bg-white/60 ring-1 ring-slate-200/70 dark:divide-white/10 dark:bg-white/[0.035] dark:ring-white/10"
+                  : "divide-border/60 bg-muted/35",
+              )}
+            >
               <MetricTile
-                icon={<Activity className="h-3.5 w-3.5" />}
                 label={t("usage.totalRequests")}
                 value={
                   isLoading ? "--" : summary.totalRequests.toLocaleString()
                 }
-                accent="text-sky-600 dark:text-sky-400"
-                theme={visualTheme}
               />
               <MetricTile
-                icon={<Database className="h-3.5 w-3.5" />}
                 label={t("usage.cacheHitRate")}
                 value={
                   isLoading ? "--" : formatPercent(summary.cacheHitRate, "unit")
                 }
-                accent="text-emerald-600 dark:text-emerald-400"
-                theme={visualTheme}
               />
               <MetricTile
-                icon={<Server className="h-3.5 w-3.5" />}
                 label={t("usage.trayPanel.sources", "Sources")}
                 value={isLoading ? "--" : String(providers?.length ?? 0)}
-                accent="text-amber-600 dark:text-amber-400"
-                theme={visualTheme}
               />
               <MetricTile
-                icon={<CheckCircle2 className="h-3.5 w-3.5" />}
                 label={t("usage.trayPanel.success", "Success")}
                 value={isLoading ? "--" : formatPercent(summary.successRate)}
-                accent="text-violet-600 dark:text-violet-400"
-                theme={visualTheme}
               />
             </div>
 
@@ -542,13 +579,151 @@ export function TrayUsagePanel() {
             </PanelSection>
 
             <PanelSection
-              title={t("usage.trayPanel.apps", "Apps")}
-              meta={hasUsage ? String(apps.length) : undefined}
+              title={t("usage.trayPanel.performance", "Codex performance")}
+              meta={
+                sessionInsights
+                  ? t("usage.trayPanel.rangePerformanceMeta", {
+                      range: activeRangeLabel,
+                      turns: sessionInsights.completedTurns,
+                      sessions: sessionInsights.sessionCount,
+                      defaultValue:
+                        "{{range}} · {{turns}} turns · {{sessions}} sessions",
+                    })
+                  : undefined
+              }
               theme={visualTheme}
             >
-              {topApps.length === 0 ? (
-                <EmptyRow theme={visualTheme}>{t("usage.noData")}</EmptyRow>
-              ) : (
+              <div
+                className={cn(
+                  "grid grid-cols-2 overflow-hidden rounded-lg border",
+                  isCardTheme
+                    ? "border-slate-200/80 bg-white/55 dark:border-white/10 dark:bg-white/[0.025]"
+                    : "border-border/60 bg-muted/20",
+                )}
+              >
+                <FeaturedMetric
+                  icon={<Clock3 className="h-3 w-3" />}
+                  label="TTFT P50"
+                  value={
+                    isInsightsLoading
+                      ? "--"
+                      : formatDurationMs(sessionInsights?.ttftMs.p50)
+                  }
+                  accent="text-foreground"
+                  theme={visualTheme}
+                />
+                <FeaturedMetric
+                  icon={<Timer className="h-3 w-3" />}
+                  label={t("usage.trayPanel.latencyP95", "Latency P95")}
+                  value={
+                    isInsightsLoading
+                      ? "--"
+                      : formatDurationMs(sessionInsights?.totalLatencyMs.p95)
+                  }
+                  accent="text-foreground"
+                  theme={visualTheme}
+                />
+                <FeaturedMetric
+                  icon={<Gauge className="h-3 w-3" />}
+                  label={t("usage.trayPanel.effectiveTps", "Effective TPS")}
+                  value={
+                    isInsightsLoading
+                      ? "--"
+                      : formatRate(sessionInsights?.weightedEffectiveTps)
+                  }
+                  accent="text-emerald-600 dark:text-emerald-400"
+                  theme={visualTheme}
+                />
+                <FeaturedMetric
+                  icon={<Database className="h-3 w-3" />}
+                  label={t("usage.cacheHitRate")}
+                  value={
+                    isInsightsLoading
+                      ? "--"
+                      : formatPercent(
+                          sessionInsights?.cacheHitRate ?? 0,
+                          "unit",
+                        )
+                  }
+                  accent="text-emerald-600 dark:text-emerald-400"
+                  theme={visualTheme}
+                />
+              </div>
+
+              <div className="mt-2.5 grid grid-cols-4 gap-x-0 gap-y-2 rounded-lg bg-muted/25 px-2.5 py-2">
+                <InlineMetric
+                  label="TTFT P95"
+                  value={
+                    isInsightsLoading
+                      ? "--"
+                      : formatDurationMs(sessionInsights?.ttftMs.p95)
+                  }
+                />
+                <InlineMetric
+                  label="TTFT P99"
+                  value={
+                    isInsightsLoading
+                      ? "--"
+                      : formatDurationMs(sessionInsights?.ttftMs.p99)
+                  }
+                />
+                <InlineMetric
+                  label={t("usage.trayPanel.latencyP50", "Latency P50")}
+                  value={
+                    isInsightsLoading
+                      ? "--"
+                      : formatDurationMs(sessionInsights?.totalLatencyMs.p50)
+                  }
+                />
+                <InlineMetric
+                  label={t("usage.trayPanel.latencyP99", "Latency P99")}
+                  value={
+                    isInsightsLoading
+                      ? "--"
+                      : formatDurationMs(sessionInsights?.totalLatencyMs.p99)
+                  }
+                />
+                <InlineMetric
+                  label="RPM"
+                  value={
+                    isInsightsLoading
+                      ? "--"
+                      : formatRate(sessionInsights?.rpm, 2)
+                  }
+                />
+                <InlineMetric
+                  label="TPM"
+                  value={
+                    isInsightsLoading
+                      ? "--"
+                      : formatTokensShort(sessionInsights?.tpm ?? 0, lang)
+                  }
+                />
+                <InlineMetric
+                  label={t("usage.trayPanel.callsPerTurn", "Calls / turn")}
+                  value={
+                    isInsightsLoading
+                      ? "--"
+                      : formatRate(sessionInsights?.callsPerTurn, 2)
+                  }
+                />
+                <InlineMetric
+                  label={t("usage.trayPanel.modelRequests", "Model requests")}
+                  value={
+                    isInsightsLoading
+                      ? "--"
+                      : (sessionInsights?.modelRequests ?? 0).toLocaleString()
+                  }
+                />
+              </div>
+            </PanelSection>
+
+            {topApps.length > 1 && (
+              <PanelSection
+                title={t("usage.trayPanel.apps", "Apps")}
+                meta={hasUsage ? String(apps.length) : undefined}
+                theme={visualTheme}
+              >
                 <div className="space-y-2">
                   {topApps.map((app) => {
                     const appConfig = isKnownAppId(app.appType)
@@ -574,13 +749,19 @@ export function TrayUsagePanel() {
                     );
                   })}
                 </div>
-              )}
-            </PanelSection>
+              </PanelSection>
+            )}
 
             <PanelSection
               title={t("usage.trayPanel.models", "Models")}
               meta={
-                topModels.length > 0 ? String(models?.length ?? 0) : undefined
+                topModels.length > 0
+                  ? t("usage.trayPanel.modelCountCostMeta", {
+                      count: models?.length ?? 0,
+                      cost: formatUsdAuto(totalCost),
+                      defaultValue: "{{count}} models · {{cost}}",
+                    })
+                  : undefined
               }
               theme={visualTheme}
             >
@@ -596,12 +777,41 @@ export function TrayUsagePanel() {
                       secondary={formatUsdAuto(model.totalCost)}
                       barValue={model.totalTokens}
                       maxValue={topModels[0]?.totalTokens ?? 0}
-                      accent="bg-violet-500"
+                      accent="bg-emerald-500"
                       theme={visualTheme}
                     />
                   ))}
                 </div>
               )}
+            </PanelSection>
+
+            <ToolActivitySection
+              title={t("usage.trayPanel.toolActivity", "Tool activity")}
+              mcpLabel={t("usage.trayPanel.mcpCalls", "MCP calls")}
+              skillLabel={t("usage.trayPanel.skillCalls", "Skill loads")}
+              mcpItems={topMcpCalls}
+              skillItems={topSkillCalls}
+              mcpTotal={totalMcpCalls}
+              skillTotal={totalSkillCalls}
+              theme={visualTheme}
+              emptyLabel={t(
+                "usage.trayPanel.noToolActivity",
+                "No tool activity in this range",
+              )}
+            />
+
+            <PanelSection
+              title={t("usage.trayPanel.dailyActivity", "Daily activity")}
+              theme={visualTheme}
+            >
+              <ActivityGrid
+                items={activityDays ?? []}
+                theme={visualTheme}
+                emptyLabel={t("usage.noData")}
+                lang={lang}
+                lessLabel={t("usage.trayPanel.less", "Less")}
+                moreLabel={t("usage.trayPanel.more", "More")}
+              />
             </PanelSection>
           </div>
         </div>
@@ -624,10 +834,8 @@ function ThemeSelector({
   return (
     <div
       className={cn(
-        "flex h-7 rounded-md p-0.5",
-        isCardTheme
-          ? "border-2 border-slate-800 bg-white shadow-[2px_2px_0_#cbd5e1] dark:border-slate-200 dark:bg-slate-900"
-          : "border border-border/70 bg-muted/40",
+        "flex h-7 rounded-lg bg-muted/55 p-0.5 ring-1",
+        isCardTheme ? "ring-white/10" : "ring-border/50",
       )}
     >
       {TRAY_THEME_OPTIONS.map((option) => {
@@ -641,14 +849,12 @@ function ThemeSelector({
             aria-pressed={value === option.value}
             onClick={() => onChange(option.value)}
             className={cn(
-              "grid h-6 w-7 place-items-center rounded transition-colors",
+              "grid h-6 w-7 place-items-center rounded-md transition-colors",
               value === option.value
                 ? isCardTheme
-                  ? "bg-amber-200 text-slate-950"
-                  : "bg-background text-foreground shadow-sm"
-                : isCardTheme
-                  ? "text-slate-500 hover:bg-amber-100 hover:text-slate-950 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-100"
-                  : "text-muted-foreground hover:text-foreground",
+                  ? "bg-emerald-400 text-[#0b1712] shadow-sm"
+                  : "bg-foreground text-background shadow-sm"
+                : "text-muted-foreground hover:text-foreground",
             )}
           >
             {option.icon}
@@ -673,10 +879,10 @@ function TokenSplitBar({
   return (
     <div
       className={cn(
-        "flex overflow-hidden rounded bg-muted/70",
+        "flex h-1.5 overflow-hidden rounded-full bg-muted/70",
         isCardTheme
-          ? "h-3 border border-slate-800 dark:border-slate-200"
-          : "h-2",
+          ? "ring-1 ring-slate-200/70 dark:ring-white/10"
+          : "ring-1 ring-border/40",
       )}
     >
       {segments.map((segment) => {
@@ -714,9 +920,9 @@ function TokenLegend({
   return (
     <div
       className={cn(
-        "flex min-w-0 items-center gap-1.5 text-[11px]",
+        "flex min-w-0 items-center gap-1.5 text-[10px]",
         isCardTheme
-          ? "font-medium text-slate-600 dark:text-slate-300"
+          ? "font-medium text-slate-600 dark:text-slate-400"
           : "text-muted-foreground",
       )}
     >
@@ -727,7 +933,20 @@ function TokenLegend({
   );
 }
 
-function MetricTile({
+function MetricTile({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="min-w-0 px-2 text-center">
+      <div className="truncate text-[8px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
+        {label}
+      </div>
+      <div className="mt-1 truncate font-mono text-[14px] font-semibold tracking-[-0.025em] tabular-nums">
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function FeaturedMetric({
   icon,
   label,
   value,
@@ -740,25 +959,240 @@ function MetricTile({
   accent: string;
   theme: TrayVisualTheme;
 }) {
-  const isCardTheme = theme === "card";
-
   return (
     <div
       className={cn(
-        "min-w-0 rounded-md px-2.5 py-2",
-        isCardTheme
-          ? "border border-slate-800 bg-white shadow-[2px_2px_0_#e2e8f0] dark:border-slate-200 dark:bg-slate-900 dark:shadow-none"
-          : "bg-muted/40",
+        "min-w-0 px-3 py-2.5 odd:border-r [&:nth-child(-n+2)]:border-b",
+        theme === "card"
+          ? "border-slate-200/80 dark:border-white/10"
+          : "border-border/60",
       )}
     >
-      <div className={cn("flex items-center gap-1.5", accent)}>
-        {icon}
-        <span className="min-w-0 truncate text-[11px] text-muted-foreground">
-          {label}
-        </span>
+      <div
+        className={cn("flex items-center gap-1.5 truncate text-[10px]", accent)}
+      >
+        <span className="shrink-0">{icon}</span>
+        <span className="truncate">{label}</span>
       </div>
-      <div className="mt-1 truncate text-base font-semibold tabular-nums">
+      <div className="mt-1.5 truncate font-mono text-[18px] font-semibold tracking-[-0.03em] leading-none tabular-nums">
         {value}
+      </div>
+    </div>
+  );
+}
+
+function InlineMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="min-w-0 border-l border-border/50 px-2 first:border-l-0 first:pl-0 [&:nth-child(5)]:border-l-0 [&:nth-child(5)]:pl-0">
+      <div className="truncate text-[8px] font-medium uppercase tracking-[0.08em] text-muted-foreground">
+        {label}
+      </div>
+      <div className="mt-0.5 truncate font-mono text-[11px] font-semibold tabular-nums">
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function ToolActivitySection({
+  title,
+  mcpLabel,
+  skillLabel,
+  mcpItems,
+  skillItems,
+  mcpTotal,
+  skillTotal,
+  theme,
+  emptyLabel,
+}: {
+  title: string;
+  mcpLabel: string;
+  skillLabel: string;
+  mcpItems: NamedCount[];
+  skillItems: NamedCount[];
+  mcpTotal: number;
+  skillTotal: number;
+  theme: TrayVisualTheme;
+  emptyLabel: string;
+}) {
+  const hasMcp = mcpItems.length > 0;
+  const hasSkills = skillItems.length > 0;
+
+  return (
+    <PanelSection
+      title={title}
+      meta={`${mcpTotal.toLocaleString()} MCP · ${skillTotal.toLocaleString()} Skills`}
+      theme={theme}
+    >
+      {!hasMcp && !hasSkills ? (
+        <EmptyRow theme={theme} compact>
+          {emptyLabel}
+        </EmptyRow>
+      ) : (
+        <div className="space-y-2.5">
+          {hasMcp && (
+            <ToolRanking
+              label={mcpLabel}
+              icon={<Wrench className="h-3 w-3" />}
+              items={mcpItems}
+              theme={theme}
+            />
+          )}
+          {hasSkills && (
+            <ToolRanking
+              label={skillLabel}
+              icon={<Sparkles className="h-3 w-3" />}
+              items={skillItems}
+              theme={theme}
+            />
+          )}
+        </div>
+      )}
+    </PanelSection>
+  );
+}
+
+function ToolRanking({
+  label,
+  icon,
+  items,
+  theme,
+}: {
+  label: string;
+  icon: ReactNode;
+  items: NamedCount[];
+  theme: TrayVisualTheme;
+}) {
+  return (
+    <div>
+      <div className="mb-1.5 flex items-center gap-1.5 text-[10px] font-medium text-muted-foreground">
+        {icon}
+        <span>{label}</span>
+      </div>
+      <div className="space-y-1.5">
+        {items.map((item) => (
+          <RankRow
+            key={item.name}
+            label={item.name}
+            value={item.count.toLocaleString()}
+            barValue={item.count}
+            maxValue={items[0]?.count ?? 0}
+            accent="bg-emerald-500"
+            theme={theme}
+            compact
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ActivityGrid({
+  items,
+  theme,
+  emptyLabel,
+  lang,
+  lessLabel,
+  moreLabel,
+}: {
+  items: UsageActivityDay[];
+  theme: TrayVisualTheme;
+  emptyLabel: string;
+  lang: string;
+  lessLabel: string;
+  moreLabel: string;
+}) {
+  const days = items.slice(-182);
+  if (days.length === 0) {
+    return <EmptyRow theme={theme}>{emptyLabel}</EmptyRow>;
+  }
+
+  const maxTokens = Math.max(...days.map((day) => day.realTotalTokens), 1);
+  const columnCount = Math.ceil(days.length / 7);
+  const monthLabels = days.flatMap((day, index) => {
+    const parsed = parseTrendDate(day.date);
+    if (!parsed || parsed.getDate() > 7) return [];
+    return [
+      {
+        key: `${day.date}-${index}`,
+        column: Math.floor(index / 7) + 1,
+        label: new Intl.DateTimeFormat(getLocaleFromLanguage(lang), {
+          month: "short",
+        }).format(parsed),
+      },
+    ];
+  });
+
+  return (
+    <div>
+      <div
+        className="relative mb-1 h-3 overflow-hidden text-[8px] text-muted-foreground"
+        style={{ width: `${columnCount * 11 - 3}px` }}
+        aria-hidden="true"
+      >
+        {monthLabels.map((month) => (
+          <span
+            key={month.key}
+            className="absolute top-0 whitespace-nowrap"
+            style={{ left: `${(month.column - 1) * 11}px` }}
+          >
+            {month.label}
+          </span>
+        ))}
+      </div>
+      <div
+        className="grid justify-start gap-[3px] overflow-hidden"
+        style={{
+          gridAutoFlow: "column",
+          gridTemplateRows: "repeat(7, 8px)",
+          gridAutoColumns: "8px",
+        }}
+        aria-label="Daily token activity"
+      >
+        {days.map((day) => {
+          const ratio = day.realTotalTokens / maxTokens;
+          const level =
+            day.realTotalTokens === 0
+              ? 0
+              : ratio > 0.66
+                ? 4
+                : ratio > 0.33
+                  ? 3
+                  : ratio > 0.12
+                    ? 2
+                    : 1;
+          return (
+            <span
+              key={day.date}
+              className={cn(
+                "rounded-[2px]",
+                level === 0 && "bg-muted/60",
+                level === 1 && "bg-emerald-200 dark:bg-emerald-950",
+                level === 2 && "bg-emerald-300 dark:bg-emerald-800",
+                level === 3 && "bg-emerald-500 dark:bg-emerald-600",
+                level === 4 && "bg-emerald-700 dark:bg-emerald-400",
+              )}
+              title={`${day.date}: ${day.realTotalTokens.toLocaleString()} tokens`}
+            />
+          );
+        })}
+      </div>
+      <div className="mt-1.5 flex items-center justify-end gap-1 text-[9px] text-muted-foreground">
+        <span>{lessLabel}</span>
+        {[0, 1, 2, 3, 4].map((level) => (
+          <span
+            key={level}
+            className={cn(
+              "h-2 w-2 rounded-[2px]",
+              level === 0 && "bg-muted/60",
+              level === 1 && "bg-emerald-200 dark:bg-emerald-950",
+              level === 2 && "bg-emerald-300 dark:bg-emerald-800",
+              level === 3 && "bg-emerald-500 dark:bg-emerald-600",
+              level === 4 && "bg-emerald-700 dark:bg-emerald-400",
+            )}
+          />
+        ))}
+        <span>{moreLabel}</span>
       </div>
     </div>
   );
@@ -780,16 +1214,16 @@ function PanelSection({
   return (
     <section
       className={cn(
-        "pt-3",
+        "pt-4",
         isCardTheme
-          ? "border-t-2 border-slate-800 dark:border-slate-200"
-          : "border-t border-border/70",
+          ? "border-t border-slate-200/80 dark:border-white/10"
+          : "border-t border-border/60",
       )}
     >
-      <div className="mb-2 flex items-baseline justify-between gap-2">
+      <div className="mb-2.5 flex items-baseline justify-between gap-2">
         <SectionTitle>{title}</SectionTitle>
         {meta && (
-          <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">
+          <span className="shrink-0 font-mono text-[9px] tabular-nums text-muted-foreground">
             {meta}
           </span>
         )}
@@ -801,7 +1235,7 @@ function PanelSection({
 
 function SectionTitle({ children }: { children: ReactNode }) {
   return (
-    <div className="text-[11px] font-semibold uppercase text-muted-foreground">
+    <div className="text-[9px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
       {children}
     </div>
   );
@@ -832,10 +1266,10 @@ function TrendBars({
     <div>
       <div
         className={cn(
-          "relative flex h-[86px] items-end gap-1.5 pb-1",
+          "relative flex h-[78px] items-end gap-1.5 overflow-hidden rounded-lg border-b px-1 pb-1",
           isCardTheme
-            ? "rounded-md border border-slate-800 bg-white/80 px-2 dark:border-slate-200 dark:bg-slate-900"
-            : "border-b border-border/70",
+            ? "border-slate-200/80 bg-white/35 dark:border-white/10 dark:bg-white/[0.018]"
+            : "border-border/60 bg-muted/15",
           compact && "justify-center",
         )}
       >
@@ -843,7 +1277,7 @@ function TrendBars({
           className={cn(
             "pointer-events-none absolute inset-x-0 top-5 border-t",
             isCardTheme
-              ? "border-slate-200 dark:border-slate-700"
+              ? "border-slate-200/80 dark:border-white/[0.07]"
               : "border-border/40",
           )}
         />
@@ -851,7 +1285,7 @@ function TrendBars({
           className={cn(
             "pointer-events-none absolute inset-x-0 top-10 border-t",
             isCardTheme
-              ? "border-slate-100 dark:border-slate-800"
+              ? "border-slate-200/50 dark:border-white/[0.045]"
               : "border-border/30",
           )}
         />
@@ -859,7 +1293,7 @@ function TrendBars({
           const total = trendTotalTokens(day);
           const inputLike = trendInputLikeTokens(day);
           const output = day.totalOutputTokens;
-          const height = total > 0 ? Math.max(5, (total / max) * 68) : 0;
+          const height = total > 0 ? Math.max(4, (total / max) * 62) : 0;
           const outputPct = total > 0 ? (output / total) * 100 : 0;
           const inputPct = total > 0 ? (inputLike / total) * 100 : 0;
 
@@ -875,14 +1309,13 @@ function TrendBars({
               <div
                 className={cn(
                   "flex w-full flex-col overflow-hidden rounded-t-[3px] bg-muted/70",
-                  isCardTheme &&
-                    "border border-slate-800 dark:border-slate-200",
+                  isCardTheme && "ring-1 ring-slate-200/70 dark:ring-white/10",
                 )}
                 style={{ height }}
               >
                 {output > 0 && (
                   <div
-                    className="bg-violet-400"
+                    className="bg-emerald-300 dark:bg-emerald-700"
                     style={{
                       height: `${Math.max(8, outputPct)}%`,
                     }}
@@ -926,18 +1359,21 @@ function TrendBars({
 function EmptyRow({
   children,
   theme,
+  compact = false,
 }: {
   children: ReactNode;
   theme: TrayVisualTheme;
+  compact?: boolean;
 }) {
   const isCardTheme = theme === "card";
 
   return (
     <div
       className={cn(
-        "rounded-md px-3 py-3 text-center text-xs text-muted-foreground",
+        "rounded-md px-3 text-center text-xs text-muted-foreground",
+        compact ? "py-1.5" : "py-3",
         isCardTheme
-          ? "border border-slate-800 bg-white/80 dark:border-slate-200 dark:bg-slate-900"
+          ? "border border-dashed border-slate-300/80 bg-white/35 dark:border-white/10 dark:bg-white/[0.025]"
           : "bg-muted/35",
       )}
     >
@@ -955,6 +1391,7 @@ function RankRow({
   maxValue,
   accent,
   theme,
+  compact = false,
 }: {
   icon?: ReactNode;
   label: string;
@@ -964,48 +1401,46 @@ function RankRow({
   maxValue: number;
   accent: string;
   theme: TrayVisualTheme;
+  compact?: boolean;
 }) {
   const width = maxValue > 0 ? Math.max(4, (barValue / maxValue) * 100) : 0;
   const isCardTheme = theme === "card";
 
   return (
     <div
-      className={cn(
-        "min-w-0",
-        isCardTheme &&
-          "rounded-md border border-slate-800 bg-white px-2.5 py-2 shadow-[2px_2px_0_#e2e8f0] dark:border-slate-200 dark:bg-slate-900 dark:shadow-none",
-      )}
+      className={cn("min-w-0", isCardTheme && (compact ? "py-1" : "py-1.5"))}
     >
       <div className="mb-1 flex min-w-0 items-center gap-2">
         {icon && (
           <span
             className={cn(
               "flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-muted/60",
-              isCardTheme && "border border-slate-800 dark:border-slate-200",
+              isCardTheme && "ring-1 ring-slate-200/70 dark:ring-white/10",
             )}
           >
             {icon}
           </span>
         )}
         <span
-          className="min-w-0 flex-1 truncate text-xs font-medium"
+          className="min-w-0 flex-1 truncate text-[11px] font-medium"
           title={label}
         >
           {label}
         </span>
         {secondary && (
-          <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
+          <span className="shrink-0 font-mono text-[10px] tabular-nums text-muted-foreground">
             {secondary}
           </span>
         )}
-        <span className="shrink-0 text-xs font-semibold tabular-nums">
+        <span className="shrink-0 font-mono text-[11px] font-semibold tabular-nums">
           {value}
         </span>
       </div>
       <div
         className={cn(
-          "h-1.5 overflow-hidden rounded bg-muted/60",
-          isCardTheme && "border border-slate-800 dark:border-slate-200",
+          "h-1 overflow-hidden rounded-full bg-muted/65",
+          compact && "h-[3px]",
+          isCardTheme && "ring-1 ring-slate-200/60 dark:ring-white/10",
         )}
       >
         <div

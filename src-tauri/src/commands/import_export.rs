@@ -11,6 +11,9 @@ use crate::commands::sync_support::{
 use crate::database::backup::BackupEntry;
 use crate::database::Database;
 use crate::error::AppError;
+use crate::services::maka_config_backup::{
+    MakaConfigBackupService, MakaLlmBackupEntry, MakaLlmRestoreResult,
+};
 use crate::services::provider::ProviderService;
 use crate::store::AppState;
 
@@ -173,4 +176,36 @@ pub fn rename_db_backup(
 #[tauri::command]
 pub fn delete_db_backup(filename: String) -> Result<(), String> {
     Database::delete_backup(&filename).map_err(|e| e.to_string())
+}
+
+// ─── Maka LLM backup management ────────────────────────────
+
+/// Create a protected local backup of Maka connections and credentials.
+#[tauri::command]
+pub async fn create_maka_llm_backup() -> Result<MakaLlmBackupEntry, String> {
+    tauri::async_runtime::spawn_blocking(MakaConfigBackupService::create_backup)
+        .await
+        .map_err(|e| format!("Maka LLM 备份任务失败: {e}"))?
+        .map_err(|e| e.to_string())
+}
+
+/// List Maka LLM backups without exposing their secret contents.
+#[tauri::command]
+pub fn list_maka_llm_backups() -> Result<Vec<MakaLlmBackupEntry>, String> {
+    MakaConfigBackupService::list_backups().map_err(|e| e.to_string())
+}
+
+/// Restore a Maka LLM backup after first creating a safety backup.
+#[tauri::command]
+pub async fn restore_maka_llm_backup(filename: String) -> Result<MakaLlmRestoreResult, String> {
+    tauri::async_runtime::spawn_blocking(move || MakaConfigBackupService::restore_backup(&filename))
+        .await
+        .map_err(|e| format!("Maka LLM 恢复任务失败: {e}"))?
+        .map_err(|e| e.to_string())
+}
+
+/// Permanently delete one protected Maka LLM backup.
+#[tauri::command]
+pub fn delete_maka_llm_backup(filename: String) -> Result<(), String> {
+    MakaConfigBackupService::delete_backup(&filename).map_err(|e| e.to_string())
 }

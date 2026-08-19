@@ -96,6 +96,20 @@ export const usageKeys = {
       filters?.providerName ?? null,
       filters?.model ?? null,
     ] as const,
+  codexSessionInsights: (
+    preset: UsageRangeSelection["preset"],
+    customStartDate: number | undefined,
+    customEndDate: number | undefined,
+    liveEndTime?: boolean,
+  ) =>
+    [
+      ...usageKeys.all,
+      "codex-session-insights",
+      preset,
+      customStartDate ?? 0,
+      customEndDate ?? 0,
+      liveEndTime ?? false,
+    ] as const,
   trends: (
     preset: UsageRangeSelection["preset"],
     customStartDate: number | undefined,
@@ -291,6 +305,27 @@ export function useTrayUsageOverview(
     },
     placeholderData: options?.placeholderData,
     refetchInterval: options?.refetchInterval ?? DEFAULT_REFETCH_INTERVAL_MS,
+    refetchIntervalInBackground: options?.refetchIntervalInBackground ?? false,
+  });
+}
+
+export function useCodexSessionInsights(
+  range: UsageRangeSelection,
+  options?: UsageQueryOptions,
+) {
+  return useQuery({
+    queryKey: usageKeys.codexSessionInsights(
+      range.preset,
+      range.customStartDate,
+      range.customEndDate,
+      range.liveEndTime,
+    ),
+    queryFn: () => {
+      const { startDate, endDate } = resolveUsageRange(range);
+      return usageApi.getCodexSessionInsights(startDate, endDate);
+    },
+    placeholderData: options?.placeholderData,
+    refetchInterval: options?.refetchInterval ?? 60000,
     refetchIntervalInBackground: options?.refetchIntervalInBackground ?? false,
   });
 }

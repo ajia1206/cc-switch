@@ -226,6 +226,13 @@ fn provider_name_coalesce(log_alias: &str, provider_alias: &str) -> String {
          WHEN '_gemini_session' THEN 'Gemini (Session)' \
          WHEN '_opencode_session' THEN 'OpenCode (Session)' \
          WHEN '_grok_session' THEN 'Grok Build (Session)' \
+         WHEN '_maka_session' THEN 'Maka (Session)' \
+         WHEN '_codepilot_session' THEN 'CodePilot (Session)' \
+         WHEN '_deepseek_harness_session' THEN 'DeepSeek Harness (Session)' \
+         WHEN '_cindy_session' THEN 'Cindy (Daily)' \
+         WHEN '_cindy_claude_code' THEN 'Cindy · Claude Code' \
+         WHEN '_cindy_codex' THEN 'Cindy · Codex' \
+         WHEN '_cindy_pi' THEN 'Cindy · Pi' \
          ELSE {log_alias}.provider_id END)"
     )
 }
@@ -512,6 +519,9 @@ struct RollupDateBounds {
     start: Option<String>,
     end: Option<String>,
     is_empty: bool,
+    coarse_start: Option<String>,
+    coarse_end: Option<String>,
+    coarse_is_empty: bool,
 }
 
 fn local_datetime_from_timestamp(ts: i64) -> Result<chrono::DateTime<Local>, AppError> {
@@ -525,63 +535,107 @@ fn compute_rollup_date_bounds(
     start_ts: Option<i64>,
     end_ts: Option<i64>,
 ) -> Result<RollupDateBounds, AppError> {
-    let start = match start_ts {
+    let (start, coarse_start) = match start_ts {
         Some(ts) => {
             let local = local_datetime_from_timestamp(ts)?;
             let day = local.date_naive();
-            if local.time().num_seconds_from_midnight() == 0 {
-                Some(day.format("%Y-%m-%d").to_string())
+            let coarse = Some(day.format("%Y-%m-%d").to_string());
+            let complete = if local.time().num_seconds_from_midnight() == 0 {
+                coarse.clone()
             } else {
                 day.succ_opt()
                     .map(|next| next.format("%Y-%m-%d").to_string())
-            }
+            };
+            (complete, coarse)
         }
-        None => None,
+        None => (None, None),
     };
 
-    let end = match end_ts {
+    let (end, coarse_end) = match end_ts {
         Some(ts) => {
             let local = local_datetime_from_timestamp(ts)?;
             let day = local.date_naive();
-            if local.time().hour() == 23 && local.time().minute() == 59 {
-                Some(day.format("%Y-%m-%d").to_string())
+            let coarse = Some(day.format("%Y-%m-%d").to_string());
+            let complete = if local.time().hour() == 23 && local.time().minute() == 59 {
+                coarse.clone()
             } else {
                 day.pred_opt()
                     .map(|prev| prev.format("%Y-%m-%d").to_string())
-            }
+            };
+            (complete, coarse)
         }
-        None => None,
+        None => (None, None),
     };
 
     let is_empty = matches!((&start, &end), (Some(start), Some(end)) if start > end);
+    let coarse_is_empty = matches!(
+        (&coarse_start, &coarse_end),
+        (Some(start), Some(end)) if start > end
+    );
 
     Ok(RollupDateBounds {
         start,
         end,
         is_empty,
+        coarse_start,
+        coarse_end,
+        coarse_is_empty,
     })
+}
+
+fn rollup_date_clause(
+    params: &mut Vec<Box<dyn rusqlite::ToSql>>,
+    column: &str,
+    start: &Option<String>,
+    end: &Option<String>,
+    is_empty: bool,
+) -> String {
+    if is_empty {
+        return "1 = 0".to_string();
+    }
+    let mut parts = Vec::new();
+    if let Some(start) = start {
+        parts.push(format!("{column} >= ?"));
+        params.push(Box::new(start.clone()));
+    }
+    if let Some(end) = end {
+        parts.push(format!("{column} <= ?"));
+        params.push(Box::new(end.clone()));
+    }
+    if parts.is_empty() {
+        "1 = 1".to_string()
+    } else {
+        parts.join(" AND ")
+    }
 }
 
 fn push_rollup_date_filters(
     conditions: &mut Vec<String>,
     params: &mut Vec<Box<dyn rusqlite::ToSql>>,
     column: &str,
+    app_type_column: &str,
     bounds: &RollupDateBounds,
 ) {
-    if bounds.is_empty {
-        conditions.push("1 = 0".to_string());
+    if bounds.start.is_none()
+        && bounds.end.is_none()
+        && bounds.coarse_start.is_none()
+        && bounds.coarse_end.is_none()
+    {
         return;
     }
 
-    if let Some(start) = &bounds.start {
-        conditions.push(format!("{column} >= ?"));
-        params.push(Box::new(start.clone()));
-    }
-
-    if let Some(end) = &bounds.end {
-        conditions.push(format!("{column} <= ?"));
-        params.push(Box::new(end.clone()));
-    }
+    let complete_days =
+        rollup_date_clause(params, column, &bounds.start, &bounds.end, bounds.is_empty);
+    let coarse_days = rollup_date_clause(
+        params,
+        column,
+        &bounds.coarse_start,
+        &bounds.coarse_end,
+        bounds.coarse_is_empty,
+    );
+    conditions.push(format!(
+        "(({complete_days}) OR ({app_type_column} = 'cindy' AND ({coarse_days})))"
+    ));
 }
 
 fn local_day_start_rfc3339(day: NaiveDate) -> String {
@@ -676,6 +730,7 @@ impl Database {
             &mut rollup_conditions,
             &mut rollup_params,
             "r.date",
+            "r.app_type",
             &rollup_bounds,
         );
         if let Some(at) = app_type {
@@ -823,6 +878,7 @@ impl Database {
             &mut rollup_conditions,
             &mut rollup_params,
             "r.date",
+            "r.app_type",
             &rollup_bounds,
         );
         push_provider_model_filters(
@@ -1171,6 +1227,7 @@ impl Database {
             &mut rollup_conditions,
             &mut rollup_params,
             "r.date",
+            "r.app_type",
             &rollup_bounds,
         );
         if let Some(at) = app_type {
@@ -1360,6 +1417,7 @@ impl Database {
             &mut rollup_conditions,
             &mut rollup_params,
             "r.date",
+            "r.app_type",
             &rollup_bounds,
         );
         if let Some(at) = app_type {
@@ -1410,6 +1468,7 @@ impl Database {
             &mut legacy_rollup_conditions,
             &mut legacy_rollup_params,
             "r.date",
+            "r.app_type",
             &rollup_bounds,
         );
         if let Some(at) = app_type {
@@ -1530,6 +1589,7 @@ impl Database {
             &mut rollup_conditions,
             &mut rollup_params,
             "r.date",
+            "r.app_type",
             &rollup_bounds,
         );
         if let Some(at) = app_type {
@@ -1679,6 +1739,7 @@ impl Database {
             &mut rollup_conditions,
             &mut rollup_params,
             "r.date",
+            "r.app_type",
             &rollup_bounds,
         );
         if let Some(at) = app_type {
@@ -4281,6 +4342,108 @@ mod tests {
         assert_eq!(stats.len(), 1);
         assert_eq!(stats[0].provider_id, "_opencode_session");
         assert_eq!(stats[0].provider_name, "OpenCode (Session)");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_provider_stats_labels_deepseek_harness_session_provider() -> Result<(), AppError> {
+        let db = Database::memory()?;
+
+        {
+            let conn = lock_conn!(db.conn);
+            insert_usage_log(
+                &conn,
+                "deepseek-harness-session",
+                "deepseek_harness",
+                "_deepseek_harness_session",
+                "deepseek-v4-flash",
+                "deepseek_harness_session",
+                1000,
+                100,
+                50,
+                25,
+                0,
+                200,
+                "0.01",
+            )?;
+        }
+
+        let stats = db.get_provider_stats(None, None, Some("deepseek_harness"), None, None)?;
+        assert_eq!(stats.len(), 1);
+        assert_eq!(stats[0].provider_id, "_deepseek_harness_session");
+        assert_eq!(stats[0].provider_name, "DeepSeek Harness (Session)");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_provider_stats_labels_cindy_daily_provider() -> Result<(), AppError> {
+        let db = Database::memory()?;
+
+        {
+            let conn = lock_conn!(db.conn);
+            insert_usage_log(
+                &conn,
+                "cindy-daily",
+                "cindy",
+                "_cindy_pi",
+                "gpt-test",
+                "cindy_daily",
+                1000,
+                100,
+                50,
+                25,
+                0,
+                200,
+                "0.01",
+            )?;
+        }
+
+        let stats = db.get_provider_stats(None, None, Some("cindy"), None, None)?;
+        assert_eq!(stats.len(), 1);
+        assert_eq!(stats[0].provider_id, "_cindy_pi");
+        assert_eq!(stats[0].provider_name, "Cindy · Pi");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_cindy_daily_rollup_is_visible_in_partial_current_day_range() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let now = Local::now();
+        let today = now.date_naive().format("%Y-%m-%d").to_string();
+        let day_start = now
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .and_then(|value| Local.from_local_datetime(&value).earliest())
+            .expect("local day start")
+            .timestamp();
+
+        {
+            let conn = lock_conn!(db.conn);
+            conn.execute(
+                "INSERT INTO usage_daily_rollups (
+                    date, app_type, provider_id, model, request_model, pricing_model,
+                    request_count, success_count, input_tokens, output_tokens,
+                    cache_read_tokens, cache_creation_tokens, total_cost_usd
+                 ) VALUES (?1, 'cindy', '_cindy_session', 'gpt-test', 'gpt-test',
+                           'gpt-test', 0, 0, 1000, 100, 50, 25, '0.2')",
+                [today],
+            )?;
+        }
+
+        let cindy = db.get_usage_summary(
+            Some(day_start),
+            Some(now.timestamp()),
+            Some("cindy"),
+            None,
+            None,
+        )?;
+        assert_eq!(cindy.total_requests, 0);
+        assert_eq!(cindy.total_input_tokens, 1000);
+        assert_eq!(cindy.total_output_tokens, 100);
+        assert_eq!(cindy.total_cost, "0.200000");
 
         Ok(())
     }

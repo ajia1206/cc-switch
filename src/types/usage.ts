@@ -228,9 +228,10 @@ export interface UsageRangeSelection {
  * only ever show a partial number and mislead users into reading it as the
  * Desktop's full usage. The backend collapses `claude-desktop → claude` in
  * every dashboard query (see `folded_app_type_sql`).
- * `opencode` / `maka` / `codepilot` / `deepseek_harness` / `cindy` have no
- * proxy handler at all. Their rows come from read-only local usage importers
- * rather than route takeover.
+ * `opencode` and `pi` have no proxy handler; their usage reaches this
+ * dashboard through session importers. `maka` / `codepilot` /
+ * `deepseek_harness` / `cindy` likewise contribute read-only locally imported
+ * usage. `openclaw` / `hermes` appear only as managed apps elsewhere.
  */
 export type AppType =
   | "claude"
@@ -238,6 +239,7 @@ export type AppType =
   | "gemini"
   | "grokbuild"
   | "opencode"
+  | "pi"
   | "maka"
   | "codepilot"
   | "deepseek_harness"
@@ -251,6 +253,7 @@ export const KNOWN_APP_TYPES: ReadonlyArray<AppType> = [
   "gemini",
   "grokbuild",
   "opencode",
+  "pi",
   "maka",
   "codepilot",
   "deepseek_harness",
@@ -274,6 +277,27 @@ export const CACHE_INCLUSIVE_APP_TYPES: ReadonlySet<string> = new Set([
   "gemini",
   "grokbuild",
 ]);
+
+// Pi sessions can mix Anthropic and OpenAI APIs, but the dashboard aggregates
+// only by app type. Treat cache-write coverage as partial without changing
+// Pi's fresh-input token semantics.
+const PARTIAL_CACHE_WRITE_APP_TYPES: ReadonlySet<string> = new Set(["pi"]);
+
+export type CacheWriteAvailability = "ok" | "partial" | "na";
+
+export function getCacheWriteAvailability(
+  appTypes: readonly string[],
+): CacheWriteAvailability {
+  if (appTypes.length === 0) return "ok";
+  const unavailable = appTypes.filter((appType) =>
+    CACHE_INCLUSIVE_APP_TYPES.has(appType),
+  ).length;
+  if (unavailable === appTypes.length) return "na";
+  const partial = appTypes.some((appType) =>
+    PARTIAL_CACHE_WRITE_APP_TYPES.has(appType),
+  );
+  return unavailable === 0 && !partial ? "ok" : "partial";
+}
 
 /** Subset of request-log fields needed to derive cache-normalized input. */
 export interface CacheNormalizableLog {

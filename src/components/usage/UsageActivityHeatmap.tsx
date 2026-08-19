@@ -92,6 +92,14 @@ const INTENSITY_CLASSES: Record<
     4: "border-violet-500/30 bg-violet-500/75",
     5: "border-violet-500/40 bg-violet-600",
   },
+  pi: {
+    0: "border-border/50 bg-muted/50",
+    1: "border-fuchsia-500/15 bg-fuchsia-500/20",
+    2: "border-fuchsia-500/20 bg-fuchsia-500/35",
+    3: "border-fuchsia-500/25 bg-fuchsia-500/55",
+    4: "border-fuchsia-500/30 bg-fuchsia-500/75",
+    5: "border-fuchsia-500/40 bg-fuchsia-600",
+  },
   maka: {
     0: "border-border/50 bg-muted/50",
     1: "border-fuchsia-500/15 bg-fuchsia-500/20",
@@ -133,6 +141,7 @@ function getFilterType(appType?: string): AppType | "all" {
     appType === "gemini" ||
     appType === "grokbuild" ||
     appType === "opencode" ||
+    appType === "pi" ||
     appType === "maka" ||
     appType === "codepilot" ||
     appType === "deepseek_harness" ||

@@ -2,7 +2,7 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import { DatabaseUpgrade } from "./components/DatabaseUpgrade";
-import { TrayUsagePanel } from "@/components/usage/TrayUsagePanel";
+import { CCIslandWindow } from "@/components/usage/CCIslandWindow";
 import { UpdateProvider } from "./contexts/UpdateContext";
 import "./index.css";
 // 导入国际化配置
@@ -129,7 +129,7 @@ async function bootstrap() {
         <QueryClientProvider client={queryClient}>
           <ThemeProvider defaultTheme="system" storageKey="cc-switch-theme">
             <UpdateProvider>
-              {isTrayUsageWindow ? <TrayUsagePanel /> : <App />}
+              {isTrayUsageWindow ? <CCIslandWindow /> : <App />}
               <Toaster />
             </UpdateProvider>
           </ThemeProvider>

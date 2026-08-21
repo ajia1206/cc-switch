@@ -39,9 +39,6 @@ export const CC_ISLAND_SIZES: Record<CCIslandMode, CCIslandSize> = {
   details: { width: 380, height: 560 },
 };
 
-const MIN_ISLAND_WIDTH = 280;
-const MIN_ISLAND_HEIGHT = 56;
-
 function finiteOr(value: number | undefined, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value)
     ? value
@@ -63,7 +60,10 @@ export function getAvailableScreenBounds(
   return {
     left: finiteOr(screenLike.availLeft, 0),
     top: finiteOr(screenLike.availTop, 0),
-    width: positiveOr(screenLike.availWidth, positiveOr(screenLike.width, 1440)),
+    width: positiveOr(
+      screenLike.availWidth,
+      positiveOr(screenLike.width, 1440),
+    ),
     height: positiveOr(
       screenLike.availHeight,
       positiveOr(screenLike.height, 900),
@@ -78,8 +78,8 @@ export function fitIslandSize(
 ): CCIslandSize {
   const desired = CC_ISLAND_SIZES[mode];
   const safeMargin = Math.max(0, margin);
-  const maxWidth = Math.max(MIN_ISLAND_WIDTH, bounds.width - safeMargin * 2);
-  const maxHeight = Math.max(MIN_ISLAND_HEIGHT, bounds.height - safeMargin * 2);
+  const maxWidth = Math.max(1, bounds.width - safeMargin * 2);
+  const maxHeight = Math.max(1, bounds.height - safeMargin * 2);
 
   return {
     width: Math.round(Math.min(desired.width, maxWidth)),
@@ -100,12 +100,18 @@ export function getTopCenterPosition(
 ): CCIslandPoint {
   const safeMargin = Math.max(0, margin);
   const minX = bounds.left + safeMargin;
-  const maxX = Math.max(minX, bounds.left + bounds.width - size.width - safeMargin);
+  const maxX = Math.max(
+    minX,
+    bounds.left + bounds.width - size.width - safeMargin,
+  );
   const centeredX = bounds.left + (bounds.width - size.width) / 2;
   const x = Math.min(maxX, Math.max(minX, centeredX));
 
   const minY = bounds.top + safeMargin;
-  const maxY = Math.max(minY, bounds.top + bounds.height - size.height - safeMargin);
+  const maxY = Math.max(
+    minY,
+    bounds.top + bounds.height - size.height - safeMargin,
+  );
 
   return {
     x: Math.round(x),

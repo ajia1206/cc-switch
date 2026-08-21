@@ -308,7 +308,7 @@ function MacCCIslandWindow() {
           onClick={() => transitionTo("expanded")}
         >
           <ChevronLeft className="mr-1 h-3.5 w-3.5" />
-          {t("usage.trayPanel.backToIsland", "Island")}
+          {t("common.back", "Back")}
         </Button>
       </div>
     );
@@ -361,7 +361,7 @@ function MacCCIslandWindow() {
               CC Switch
             </div>
             <div className="truncate text-[9px] uppercase tracking-[0.14em] text-white/45">
-              {t("usage.trayPanel.today", "Today")}
+              {t("usage.presetToday", "Today")}
             </div>
           </div>
 
@@ -381,8 +381,8 @@ function MacCCIslandWindow() {
             className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-white/55 transition-colors hover:bg-white/10 hover:text-white"
             aria-label={
               compact
-                ? t("common.expand", "Expand")
-                : t("common.collapse", "Collapse")
+                ? t("usage.expand", "Expand")
+                : t("usage.collapse", "Collapse")
             }
             onClick={() =>
               transitionTo(compact ? "expanded" : "compact")
@@ -421,7 +421,7 @@ function MacCCIslandWindow() {
 
             <div className="mt-3 flex min-h-7 items-center gap-2 overflow-hidden">
               <span className="shrink-0 text-[9px] font-semibold uppercase tracking-[0.13em] text-white/35">
-                {t("usage.apps", "Apps")}
+                {t("usage.trayPanel.apps", "Apps")}
               </span>
               <div className="flex min-w-0 gap-1.5 overflow-hidden">
                 {topApps.length > 0 ? (
@@ -438,7 +438,7 @@ function MacCCIslandWindow() {
                   ))
                 ) : (
                   <span className="text-[10px] text-white/35">
-                    {t("usage.trayPanel.noUsage", "No usage yet")}
+                    {t("usage.noData", "No data")}
                   </span>
                 )}
               </div>
@@ -470,7 +470,7 @@ function MacCCIslandWindow() {
                   onClick={() => transitionTo("details")}
                 >
                   <CircleDollarSign className="mr-1.5 h-3.5 w-3.5" />
-                  {t("usage.trayPanel.fullDetails", "Full details")}
+                  {t("usage.title", "Usage Statistics")}
                 </Button>
                 <Button
                   type="button"

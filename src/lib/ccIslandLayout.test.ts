@@ -52,6 +52,20 @@ describe("CC Island layout", () => {
     });
   });
 
+  it("shrinks below the preferred minimum when the display work area is tiny", () => {
+    const tiny: AvailableScreenBounds = {
+      left: 100,
+      top: 40,
+      width: 250,
+      height: 100,
+    };
+
+    expect(createCCIslandLayout("details", tiny)).toEqual({
+      size: { width: 234, height: 84 },
+      position: { x: 108, y: 48 },
+    });
+  });
+
   it("clamps an off-spec oversized panel without producing invalid positions", () => {
     const bounds: AvailableScreenBounds = {
       left: 100,

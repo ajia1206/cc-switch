@@ -19,6 +19,7 @@
     "core:window:allow-close",
     "core:window:allow-hide",
     "core:window:allow-set-decorations",
+    "process:allow-exit",
     "process:allow-restart",
     "dialog:default"
   ]

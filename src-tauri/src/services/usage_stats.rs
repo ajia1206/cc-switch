@@ -66,6 +66,8 @@ fn derive_real_total_and_hit_rate(
 #[serde(rename_all = "camelCase")]
 pub struct DailyStats {
     pub date: String,
+    pub granularity: String,
+    pub is_approximate: bool,
     pub request_count: u64,
     pub total_cost: String,
     pub total_tokens: u64,
@@ -95,8 +97,9 @@ pub struct ProviderStats {
     pub request_count: u64,
     pub total_tokens: u64,
     pub total_cost: String,
+    pub cost_is_approximate: bool,
     pub success_rate: f32,
-    pub avg_latency_ms: u64,
+    pub avg_latency_ms: Option<u64>,
 }
 
 /// 模型统计
@@ -648,6 +651,48 @@ fn push_rollup_date_filters(
     ));
 }
 
+fn has_cindy_rollup_for_range(
+    conn: &Connection,
+    start_ts: i64,
+    end_ts: i64,
+    app_type: Option<&str>,
+    provider_name: Option<&str>,
+    model: Option<&str>,
+) -> Result<bool, AppError> {
+    // The trend response combines token and cost series. A cost-only Cindy
+    // rollup must still switch the whole response to daily granularity;
+    // otherwise the hourly response would silently drop authoritative cost.
+    if app_type.is_some_and(|value| !value.eq_ignore_ascii_case("cindy")) {
+        return Ok(false);
+    }
+    let bounds = compute_rollup_date_bounds(Some(start_ts), Some(end_ts))?;
+    let mut conditions = vec!["r.app_type = 'cindy'".to_string()];
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    conditions.push(rollup_date_clause(
+        &mut params,
+        "r.date",
+        &bounds.coarse_start,
+        &bounds.coarse_end,
+        bounds.coarse_is_empty,
+    ));
+    push_provider_model_filters(&mut conditions, &mut params, "r", "p", provider_name, model);
+    let provider_join = if provider_name.is_some() {
+        providers_join("r", "p")
+    } else {
+        String::new()
+    };
+    let sql = format!(
+        "SELECT EXISTS(
+            SELECT 1 FROM usage_daily_rollups r {provider_join}
+            WHERE {}
+        )",
+        conditions.join(" AND ")
+    );
+    let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|value| value.as_ref()).collect();
+    conn.query_row(&sql, param_refs.as_slice(), |row| row.get(0))
+        .map_err(|error| AppError::Database(format!("检查 Cindy 日补差失败: {error}")))
+}
+
 fn local_day_start_rfc3339(day: NaiveDate) -> String {
     let local_midnight = day
         .and_hms_opt(0, 0, 0)
@@ -1029,7 +1074,9 @@ impl Database {
         }
 
         let duration = end_ts - start_ts;
-        if duration <= 24 * 60 * 60 {
+        let has_cindy_fallback = duration <= 24 * 60 * 60
+            && has_cindy_rollup_for_range(&conn, start_ts, end_ts, app_type, provider_name, model)?;
+        if duration <= 24 * 60 * 60 && !has_cindy_fallback {
             let bucket_seconds: i64 = 60 * 60;
             let mut bucket_count: i64 = if duration <= 0 {
                 1
@@ -1091,6 +1138,8 @@ impl Database {
                     row.get::<_, i64>(0)?,
                     DailyStats {
                         date: String::new(),
+                        granularity: "hour".to_string(),
+                        is_approximate: false,
                         request_count: row.get::<_, i64>(1)? as u64,
                         total_cost: format!("{:.6}", row.get::<_, f64>(2)?),
                         total_tokens: row.get::<_, i64>(3)? as u64,
@@ -1136,6 +1185,8 @@ impl Database {
                 } else {
                     stats.push(DailyStats {
                         date,
+                        granularity: "hour".to_string(),
+                        is_approximate: false,
                         request_count: 0,
                         total_cost: "0.000000".to_string(),
                         total_tokens: 0,
@@ -1204,6 +1255,8 @@ impl Database {
                 row.get::<_, String>(0)?,
                 DailyStats {
                     date: String::new(),
+                    granularity: "day".to_string(),
+                    is_approximate: false,
                     request_count: row.get::<_, i64>(1)? as u64,
                     total_cost: format!("{:.6}", row.get::<_, f64>(2)?),
                     total_tokens: row.get::<_, i64>(3)? as u64,
@@ -1274,7 +1327,8 @@ impl Database {
                 COALESCE(SUM({fresh_input_rollup}), 0),
                 COALESCE(SUM(r.output_tokens), 0),
                 COALESCE(SUM(r.cache_creation_tokens), 0),
-                COALESCE(SUM(r.cache_read_tokens), 0)
+                COALESCE(SUM(r.cache_read_tokens), 0),
+                COALESCE(MAX(CASE WHEN r.app_type = 'cindy' THEN 1 ELSE 0 END), 0)
             FROM usage_daily_rollups r {rollup_join}
             {rollup_where}
             GROUP BY r.date
@@ -1293,6 +1347,7 @@ impl Database {
                     row.get::<_, i64>(5)? as u64,
                     row.get::<_, i64>(6)? as u64,
                     row.get::<_, i64>(7)? as u64,
+                    row.get::<_, i64>(8)? != 0,
                 ),
             ))
         };
@@ -1301,11 +1356,13 @@ impl Database {
         let rollup_rows = rollup_stmt.query_map(rollup_param_refs.as_slice(), rollup_row_mapper)?;
 
         for row in rollup_rows {
-            let (bucket_date, (req, cost, tok, inp, out, cc, cr)) = row?;
+            let (bucket_date, (req, cost, tok, inp, out, cc, cr, is_approximate)) = row?;
             let date = NaiveDate::parse_from_str(&bucket_date, "%Y-%m-%d")
                 .map_err(|err| AppError::Database(format!("解析 rollup 趋势日期失败: {err}")))?;
             let entry = map.entry(date).or_insert_with(|| DailyStats {
                 date: String::new(),
+                granularity: "day".to_string(),
+                is_approximate: false,
                 request_count: 0,
                 total_cost: "0.000000".to_string(),
                 total_tokens: 0,
@@ -1322,6 +1379,7 @@ impl Database {
             entry.total_output_tokens += out;
             entry.total_cache_creation_tokens += cc;
             entry.total_cache_read_tokens += cr;
+            entry.is_approximate |= is_approximate;
         }
 
         let mut stats = Vec::with_capacity(bucket_count);
@@ -1335,6 +1393,8 @@ impl Database {
             } else {
                 stats.push(DailyStats {
                     date,
+                    granularity: "day".to_string(),
+                    is_approximate: false,
                     request_count: 0,
                     total_cost: "0.000000".to_string(),
                     total_tokens: 0,
@@ -1632,6 +1692,7 @@ impl Database {
                 SUM(total_tokens) as total_tokens,
                 SUM(total_cost) as total_cost,
                 SUM(success_count) as success_count,
+                MAX(cost_is_approximate) as cost_is_approximate,
                 CASE WHEN SUM(request_count) > 0
                     THEN SUM(latency_sum) / SUM(request_count)
                     ELSE 0 END as avg_latency
@@ -1642,6 +1703,7 @@ impl Database {
                     COALESCE(SUM({fresh_input_detail} + l.output_tokens + l.cache_creation_tokens + l.cache_read_tokens), 0) as total_tokens,
                     COALESCE(SUM(CAST(l.total_cost_usd AS REAL)), 0) as total_cost,
                     COALESCE(SUM(CASE WHEN l.status_code >= 200 AND l.status_code < 300 THEN 1 ELSE 0 END), 0) as success_count,
+                    0 as cost_is_approximate,
                     COALESCE(SUM(l.latency_ms), 0) as latency_sum
                 FROM proxy_request_logs l
                 LEFT JOIN providers p ON l.provider_id = p.id AND l.app_type = p.app_type
@@ -1654,6 +1716,11 @@ impl Database {
                     COALESCE(SUM({fresh_input_rollup} + r.output_tokens + r.cache_creation_tokens + r.cache_read_tokens), 0),
                     COALESCE(SUM(CAST(r.total_cost_usd AS REAL)), 0),
                     COALESCE(SUM(r.success_count), 0),
+                    COALESCE(MAX(CASE
+                        WHEN r.app_type = 'cindy'
+                         AND r.model LIKE '%#billing=subscription'
+                         AND CAST(r.total_cost_usd AS REAL) > 0
+                        THEN 1 ELSE 0 END), 0),
                     COALESCE(SUM(r.avg_latency_ms * r.request_count), 0)
                 FROM usage_daily_rollups r
                 LEFT JOIN providers p2 ON r.provider_id = p2.id AND r.app_type = p2.app_type
@@ -1669,7 +1736,10 @@ impl Database {
         params.extend(rollup_params);
         let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
         let row_mapper = |row: &rusqlite::Row| {
+            let provider_id: String = row.get(0)?;
+            let is_cindy_provider = provider_id.starts_with("_cindy_");
             let request_count: i64 = row.get(3)?;
+            let total_cost: f64 = row.get(5)?;
             let success_count: i64 = row.get(6)?;
             let success_rate = if request_count > 0 {
                 (success_count as f32 / request_count as f32) * 100.0
@@ -1678,13 +1748,18 @@ impl Database {
             };
 
             Ok(ProviderStats {
-                provider_id: row.get(0)?,
+                cost_is_approximate: row.get::<_, i64>(7)? != 0,
+                provider_id,
                 provider_name: row.get(2)?,
                 request_count: request_count as u64,
                 total_tokens: row.get::<_, i64>(4)? as u64,
-                total_cost: format!("{:.6}", row.get::<_, f64>(5)?),
+                total_cost: format!("{total_cost:.6}"),
                 success_rate,
-                avg_latency_ms: row.get::<_, f64>(7)? as u64,
+                avg_latency_ms: if is_cindy_provider {
+                    None
+                } else {
+                    Some(row.get::<_, f64>(8)? as u64)
+                },
             })
         };
 
@@ -2120,6 +2195,7 @@ impl Database {
                         data_source, pricing_model, input_token_semantics
              FROM proxy_request_logs
              WHERE CAST(total_cost_usd AS REAL) <= 0
+               AND NOT (app_type = 'cindy' AND data_source = 'cindy_turn')
                AND (input_tokens > 0 OR output_tokens > 0
                     OR cache_read_tokens > 0 OR cache_creation_tokens > 0)";
 
@@ -3012,6 +3088,43 @@ mod tests {
         assert_eq!(cache_read_cost, "0.400000");
         assert_eq!(cache_creation_cost, "0.125000");
         assert_eq!(total_cost, "4.525000");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_backfill_skips_cindy_turn_costs_owned_by_daily_rollups() -> Result<(), AppError> {
+        let db = Database::memory()?;
+
+        {
+            let conn = lock_conn!(db.conn);
+            insert_usage_log(
+                &conn,
+                "cindy-gpt-5-6-sol-zero-cost",
+                "cindy",
+                "_cindy_codex",
+                "gpt-5.6-sol#billing=subscription",
+                "cindy_turn",
+                1000,
+                1_000_000,
+                100_000,
+                800_000,
+                20_000,
+                200,
+                "0",
+            )?;
+        }
+
+        assert_eq!(db.backfill_missing_usage_costs()?, 0);
+
+        let conn = lock_conn!(db.conn);
+        let total_cost: String = conn.query_row(
+            "SELECT total_cost_usd FROM proxy_request_logs
+             WHERE request_id = 'cindy-gpt-5-6-sol-zero-cost'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(total_cost, "0");
 
         Ok(())
     }
@@ -4414,6 +4527,39 @@ mod tests {
         assert_eq!(stats.len(), 1);
         assert_eq!(stats[0].provider_id, "_cindy_pi");
         assert_eq!(stats[0].provider_name, "Cindy · Pi");
+        assert!(!stats[0].cost_is_approximate);
+        assert_eq!(stats[0].avg_latency_ms, None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_provider_stats_marks_cindy_rollup_cost_estimated_and_latency_unknown(
+    ) -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let today = Local::now().format("%Y-%m-%d").to_string();
+
+        {
+            let conn = lock_conn!(db.conn);
+            conn.execute(
+                "INSERT INTO usage_daily_rollups (
+                    date, app_type, provider_id, model, request_model, pricing_model,
+                    request_count, success_count, input_tokens, output_tokens,
+                    cache_read_tokens, cache_creation_tokens, total_cost_usd, avg_latency_ms
+                 ) VALUES (?1, 'cindy', '_cindy_codex',
+                           'gpt-5.6-sol#billing=subscription',
+                           'gpt-5.6-sol#billing=subscription',
+                           'gpt-5.6-sol#billing=subscription',
+                           0, 0, 0, 0, 0, 0, '6.4294776', 0)",
+                [&today],
+            )?;
+        }
+
+        let stats = db.get_provider_stats(None, None, Some("cindy"), None, None)?;
+        assert_eq!(stats.len(), 1);
+        assert_eq!(stats[0].total_cost, "6.429478");
+        assert!(stats[0].cost_is_approximate);
+        assert_eq!(stats[0].avg_latency_ms, None);
 
         Ok(())
     }
@@ -4570,6 +4716,146 @@ mod tests {
         let stats = db.get_daily_trends(Some(0), Some(15 * 60 * 60), Some("claude"), None, None)?;
         assert_eq!(stats.len(), 15);
         assert_eq!(stats[3].request_count, 1);
+        assert!(stats.iter().all(|item| item.granularity == "hour"));
+        assert!(stats.iter().all(|item| !item.is_approximate));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_daily_trends_uses_daily_granularity_for_cindy_residual() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let now = Local::now();
+        let day_start = now
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .and_then(|value| Local.from_local_datetime(&value).earliest())
+            .expect("local day start")
+            .timestamp();
+        let detail_time = now.timestamp().max(day_start + 1);
+        let today = now.date_naive().format("%Y-%m-%d").to_string();
+
+        {
+            let conn = lock_conn!(db.conn);
+            conn.execute(
+                "INSERT INTO proxy_request_logs (
+                    request_id, provider_id, app_type, model,
+                    input_tokens, output_tokens, cache_read_tokens,
+                    cache_creation_tokens, input_token_semantics,
+                    total_cost_usd, latency_ms, status_code, created_at, data_source
+                 ) VALUES ('cindy-turn', '_cindy_pi', 'cindy', 'gpt-test',
+                           60, 10, 40, 5, 2, '0', 100, 200, ?1, 'cindy_turn')",
+                [detail_time],
+            )?;
+            conn.execute(
+                "INSERT INTO usage_daily_rollups (
+                    date, app_type, provider_id, model, request_model, pricing_model,
+                    request_count, success_count, input_tokens, output_tokens,
+                    cache_read_tokens, cache_creation_tokens, input_token_semantics,
+                    total_cost_usd, avg_latency_ms
+                 ) VALUES (?1, 'cindy', '_cindy_pi', 'gpt-test', 'gpt-test', 'gpt-test',
+                           0, 0, 40, 10, 30, 5, 2, '0', 0)",
+                [today],
+            )?;
+        }
+
+        let stats = db.get_daily_trends(
+            Some(day_start),
+            Some(now.timestamp().max(day_start + 1)),
+            Some("cindy"),
+            None,
+            None,
+        )?;
+        assert_eq!(stats.len(), 1);
+        assert_eq!(stats[0].granularity, "day");
+        assert!(stats[0].is_approximate);
+        assert_eq!(stats[0].request_count, 1);
+        assert_eq!(stats[0].total_input_tokens, 100);
+        assert_eq!(stats[0].total_output_tokens, 20);
+        assert_eq!(stats[0].total_cache_read_tokens, 70);
+        assert_eq!(stats[0].total_cache_creation_tokens, 10);
+
+        let filtered = db.get_daily_trends(
+            Some(day_start),
+            Some(now.timestamp().max(day_start + 1)),
+            Some("cindy"),
+            Some("Cindy · Pi"),
+            Some("gpt-test"),
+        )?;
+        assert_eq!(filtered[0].granularity, "day");
+
+        let mismatched = db.get_daily_trends(
+            Some(day_start),
+            Some(now.timestamp().max(day_start + 1)),
+            Some("cindy"),
+            Some("Cindy · Pi"),
+            Some("other-model"),
+        )?;
+        assert!(mismatched.iter().all(|item| item.granularity == "hour"));
+
+        let all_apps = db.get_daily_trends(
+            Some(day_start),
+            Some(now.timestamp().max(day_start + 1)),
+            None,
+            None,
+            None,
+        )?;
+        assert_eq!(all_apps[0].granularity, "day");
+        assert!(all_apps[0].is_approximate);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_daily_trends_keeps_cost_only_cindy_rollup_in_daily_response() -> Result<(), AppError>
+    {
+        let db = Database::memory()?;
+        let now = Local::now();
+        let day_start = now
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .and_then(|value| Local.from_local_datetime(&value).earliest())
+            .expect("local day start")
+            .timestamp();
+        let detail_time = now.timestamp().max(day_start + 1);
+        let today = now.date_naive().format("%Y-%m-%d").to_string();
+
+        {
+            let conn = lock_conn!(db.conn);
+            conn.execute(
+                "INSERT INTO proxy_request_logs (
+                    request_id, provider_id, app_type, model,
+                    input_tokens, output_tokens, cache_read_tokens,
+                    cache_creation_tokens, input_token_semantics,
+                    total_cost_usd, latency_ms, status_code, created_at, data_source
+                 ) VALUES ('cindy-turn', '_cindy_pi', 'cindy', 'gpt-test',
+                           60, 10, 40, 5, 2, '0', 100, 200, ?1, 'cindy_turn')",
+                [detail_time],
+            )?;
+            conn.execute(
+                "INSERT INTO usage_daily_rollups (
+                    date, app_type, provider_id, model, request_model, pricing_model,
+                    request_count, success_count, input_tokens, output_tokens,
+                    cache_read_tokens, cache_creation_tokens, input_token_semantics,
+                    total_cost_usd, avg_latency_ms
+                 ) VALUES (?1, 'cindy', '_cindy_pi', 'gpt-test', 'gpt-test', 'gpt-test',
+                           0, 0, 0, 0, 0, 0, 2, '0.25', 0)",
+                [today],
+            )?;
+        }
+
+        let stats = db.get_daily_trends(
+            Some(day_start),
+            Some(now.timestamp().max(day_start + 1)),
+            Some("cindy"),
+            None,
+            None,
+        )?;
+        assert_eq!(stats.len(), 1);
+        assert_eq!(stats[0].granularity, "day");
+        assert!(stats[0].is_approximate);
+        assert_eq!(stats[0].total_input_tokens, 60);
+        assert_eq!(stats[0].total_cost, "0.250000");
 
         Ok(())
     }

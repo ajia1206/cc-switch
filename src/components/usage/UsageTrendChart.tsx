@@ -32,6 +32,8 @@ interface UsageTrendChartProps {
 
 export interface UsageTrendStatLike {
   date: string;
+  granularity?: "hour" | "day";
+  isApproximate?: boolean;
   totalInputTokens: number;
   totalOutputTokens: number;
   totalCacheCreationTokens: number;
@@ -53,6 +55,7 @@ export interface UsageTrendChartPoint {
   cacheCreationTokens: number;
   cacheReadTokens: number;
   cost: number | null;
+  isApproximate: boolean;
 }
 
 /** Build chart rows from backend trend stats. Exported for unit tests. */
@@ -121,6 +124,7 @@ export function buildUsageTrendChartData(
         cacheCreationTokens: stat.totalCacheCreationTokens,
         cacheReadTokens: stat.totalCacheReadTokens,
         cost: cost ?? null,
+        isApproximate: stat.isApproximate ?? false,
       };
     }) || []
   );
@@ -133,6 +137,19 @@ export function formatUsageTrendTickLabel(
 ): string {
   const point = chartData.find((row) => row.xKey === xKey);
   return point?.label ?? xKey;
+}
+
+export function resolveUsageTrendPresentation(
+  trends: UsageTrendStatLike[] | undefined,
+  durationSeconds: number,
+) {
+  return {
+    isHourly:
+      trends?.[0]?.granularity === "hour" ||
+      (trends?.[0]?.granularity === undefined &&
+        durationSeconds <= 24 * 60 * 60),
+    containsDailyFallback: trends?.some((item) => item.isApproximate) ?? false,
+  };
 }
 
 export function UsageTrendChart({
@@ -154,7 +171,10 @@ export function UsageTrendChart({
   );
 
   const durationSeconds = Math.max(endDate - startDate, 0);
-  const isHourly = durationSeconds <= 24 * 60 * 60;
+  const { isHourly, containsDailyFallback } = resolveUsageTrendPresentation(
+    trends,
+    durationSeconds,
+  );
   const language = i18n.resolvedLanguage || i18n.language || "en";
   const dateLocale = getLocaleFromLanguage(language);
 
@@ -184,6 +204,11 @@ export function UsageTrendChart({
       return (
         <div className="rounded-lg border bg-background/95 p-3 shadow-lg backdrop-blur-md">
           <p className="mb-2 font-medium">{heading}</p>
+          {point?.isApproximate && (
+            <p className="mb-2 text-xs text-amber-600 dark:text-amber-400">
+              {t("usage.dailyFallbackHint", "包含日级汇总，时间精度为天")}
+            </p>
+          )}
           {payload.map((entry: any, index: number) => (
             <div
               key={index}
@@ -214,7 +239,14 @@ export function UsageTrendChart({
         <h3 className="text-lg font-semibold">
           {t("usage.trends", "使用趋势")}
         </h3>
-        <p className="text-sm text-muted-foreground">{rangeLabel}</p>
+        <div className="text-right">
+          <p className="text-sm text-muted-foreground">{rangeLabel}</p>
+          {containsDailyFallback && (
+            <p className="text-xs text-amber-600 dark:text-amber-400">
+              {t("usage.dailyFallbackHint", "包含日级汇总，时间精度为天")}
+            </p>
+          )}
+        </div>
       </div>
 
       <div className="h-[350px] w-full">

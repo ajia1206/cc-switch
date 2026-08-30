@@ -15,11 +15,13 @@ use crate::proxy::usage::parser::TokenUsage;
 use crate::services::session_usage::{
     get_sync_state, metadata_modified_nanos, update_sync_state, SessionSyncResult,
 };
+use crate::services::sql_helpers::INPUT_TOKEN_SEMANTICS_FRESH;
 use crate::services::usage_stats::{find_model_pricing, should_skip_session_insert, DedupKey};
-use chrono::NaiveDate;
+use chrono::{Local, NaiveDate, TimeZone};
 use rust_decimal::Decimal;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -31,9 +33,12 @@ const CODEPILOT_DATA_SOURCE: &str = "codepilot_session";
 const DEEPSEEK_HARNESS_APP_TYPE: &str = "deepseek_harness";
 const DEEPSEEK_HARNESS_DATA_SOURCE: &str = "deepseek_harness_session";
 const CINDY_APP_TYPE: &str = "cindy";
-const CINDY_DATA_SOURCE: &str = "cindy_daily";
+const CINDY_LEGACY_DATA_SOURCE: &str = "cindy_daily";
+const CINDY_DETAIL_DATA_SOURCE: &str = "cindy_turn";
 const CINDY_PROVIDER_ID: &str = "_cindy_session";
-const CINDY_SOURCE_SET_SYNC_KEY: &str = "desktop:cindy:source-set";
+const CINDY_SYNC_VERSION: &str = "v3";
+const CINDY_SOURCE_SET_SYNC_KEY: &str = "desktop:cindy:v3:source-set";
+const CINDY_DETAIL_RETAIN_DAYS: i64 = 30;
 
 #[derive(Debug)]
 struct DesktopUsageRecord {
@@ -49,6 +54,7 @@ struct DesktopUsageRecord {
     cache_creation_tokens: u32,
     total_cost_usd: Option<f64>,
     latency_ms: i64,
+    duration_ms: Option<i64>,
     first_token_ms: Option<i64>,
     status_code: i64,
     error_message: Option<String>,
@@ -60,6 +66,13 @@ struct DesktopUsageRecord {
 struct UpstreamDedup {
     app_type: &'static str,
     session_id: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum DesktopUsageInsertOutcome {
+    Inserted,
+    AccountedInSameApp,
+    AccountedInUpstreamApp { total_cost_usd: f64 },
 }
 
 #[derive(Debug, Deserialize)]
@@ -119,6 +132,138 @@ struct CindyDailyUsage {
     output_tokens: i64,
     cache_read_tokens: i64,
     cache_create_tokens: i64,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CindyTurnUsageDetails {
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    cache_read_tokens: Option<u64>,
+    cache_create_tokens: Option<u64>,
+    model: Option<String>,
+    #[serde(default)]
+    models: Vec<String>,
+    duration_ms: Option<u64>,
+    turn_duration_ms: Option<u64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CindyAgentMeta {
+    turn_completed: Option<bool>,
+    turn_usage_details: Option<CindyTurnUsageDetails>,
+}
+
+#[derive(Debug)]
+struct CindyTurnUsage {
+    request_id: String,
+    day: String,
+    agent_kind: String,
+    model: String,
+    canonical_model: String,
+    session_id: String,
+    sdk_session_id: Option<String>,
+    created_at: i64,
+    duration_ms: i64,
+    input_tokens: i64,
+    output_tokens: i64,
+    cache_read_tokens: i64,
+    cache_create_tokens: i64,
+}
+
+#[derive(Debug)]
+struct CindyUsageSnapshot {
+    account_id: String,
+    daily: Vec<CindyDailyUsage>,
+    turns: Vec<CindyTurnUsage>,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct CindyUsageKey {
+    account_id: String,
+    day: String,
+    agent_kind: String,
+    canonical_model: String,
+}
+
+#[derive(Debug, Default)]
+struct CindyDailyAggregate {
+    tokens: CindyTokenBuckets,
+    total_cost_usd: f64,
+    source_models: HashMap<String, CindyDailyModelAggregate>,
+}
+
+#[derive(Debug, Default)]
+struct CindyDailyModelAggregate {
+    tokens: CindyTokenBuckets,
+    total_cost_usd: f64,
+}
+
+#[derive(Debug)]
+struct CindyArchivedRollupMetrics {
+    date: String,
+    provider_id: String,
+    model: String,
+    request_model: String,
+    pricing_model: String,
+    request_count: i64,
+    success_count: i64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct CindyTokenBuckets {
+    input: i64,
+    output: i64,
+    cache_read: i64,
+    cache_create: i64,
+}
+
+impl CindyTokenBuckets {
+    fn from_daily(usage: &CindyDailyUsage) -> Self {
+        Self {
+            input: cindy_token_i64(usage.input_tokens),
+            output: cindy_token_i64(usage.output_tokens),
+            cache_read: cindy_token_i64(usage.cache_read_tokens),
+            cache_create: cindy_token_i64(usage.cache_create_tokens),
+        }
+    }
+
+    fn from_turn(usage: &CindyTurnUsage) -> Self {
+        Self {
+            input: cindy_token_i64(usage.input_tokens),
+            output: cindy_token_i64(usage.output_tokens),
+            cache_read: cindy_token_i64(usage.cache_read_tokens),
+            cache_create: cindy_token_i64(usage.cache_create_tokens),
+        }
+    }
+
+    fn add_assign(&mut self, other: Self) {
+        self.input = self.input.saturating_add(other.input);
+        self.output = self.output.saturating_add(other.output);
+        self.cache_read = self.cache_read.saturating_add(other.cache_read);
+        self.cache_create = self.cache_create.saturating_add(other.cache_create);
+    }
+
+    fn fits_within(self, daily: Self) -> bool {
+        self.input <= daily.input
+            && self.output <= daily.output
+            && self.cache_read <= daily.cache_read
+            && self.cache_create <= daily.cache_create
+    }
+
+    fn subtract(self, covered: Self) -> Self {
+        Self {
+            input: self.input - covered.input,
+            output: self.output - covered.output,
+            cache_read: self.cache_read - covered.cache_read,
+            cache_create: self.cache_create - covered.cache_create,
+        }
+    }
+
+    fn is_zero(self) -> bool {
+        self.input == 0 && self.output == 0 && self.cache_read == 0 && self.cache_create == 0
+    }
 }
 
 fn empty_result(files_scanned: u32) -> SessionSyncResult {
@@ -209,6 +354,7 @@ fn parse_maka_attempt(
             None
         },
         latency_ms: duration_i64(attempt.latency_ms),
+        duration_ms: None,
         first_token_ms: attempt
             .time_to_first_token_ms
             .map(|value| duration_i64(Some(value))),
@@ -278,6 +424,7 @@ fn parse_codepilot_message(
         cache_creation_tokens,
         total_cost_usd: finite_non_negative(usage.cost_usd),
         latency_ms: 0,
+        duration_ms: None,
         first_token_ms: None,
         status_code: 200,
         error_message: None,
@@ -336,31 +483,65 @@ fn calculated_costs(
     }
 }
 
+fn upstream_duplicate_cost(
+    conn: &rusqlite::Connection,
+    record: &DesktopUsageRecord,
+) -> Result<Option<f64>, AppError> {
+    let Some(upstream) = &record.upstream_dedup else {
+        return Ok(None);
+    };
+    let mut statement = conn
+        .prepare_cached(
+            "SELECT model, total_cost_usd FROM proxy_request_logs
+             WHERE app_type = ?1
+               AND session_id = ?2
+               AND created_at BETWEEN ?3 AND ?4
+               AND input_tokens = ?5
+               AND output_tokens = ?6
+               AND cache_read_tokens = ?7
+               AND cache_creation_tokens = ?8",
+        )
+        .map_err(|e| AppError::Database(format!("准备跨客户端重复查询失败: {e}")))?;
+    let rows = statement
+        .query_map(
+            rusqlite::params![
+                upstream.app_type,
+                upstream.session_id,
+                record.created_at.saturating_sub(120),
+                record.created_at.saturating_add(120),
+                record.input_tokens,
+                record.output_tokens,
+                record.cache_read_tokens,
+                record.cache_creation_tokens,
+            ],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .map_err(|e| AppError::Database(format!("查询跨客户端重复用量失败: {e}")))?;
+    let record_model = canonical_cindy_model(&record.model);
+    for row in rows {
+        let (candidate, total_cost_usd) =
+            row.map_err(|e| AppError::Database(format!("读取跨客户端重复模型失败: {e}")))?;
+        let candidate_model = canonical_cindy_model(&candidate);
+        if record_model.eq_ignore_ascii_case("unknown")
+            || candidate_model.eq_ignore_ascii_case("unknown")
+            || record_model.eq_ignore_ascii_case(&candidate_model)
+        {
+            let total_cost_usd = total_cost_usd
+                .parse::<f64>()
+                .ok()
+                .filter(|value| value.is_finite() && *value >= 0.0)
+                .unwrap_or(0.0);
+            return Ok(Some(total_cost_usd));
+        }
+    }
+    Ok(None)
+}
+
 fn has_upstream_duplicate(
     conn: &rusqlite::Connection,
     record: &DesktopUsageRecord,
 ) -> Result<bool, AppError> {
-    let Some(upstream) = &record.upstream_dedup else {
-        return Ok(false);
-    };
-    conn.query_row(
-        "SELECT EXISTS(
-            SELECT 1 FROM proxy_request_logs
-            WHERE app_type = ?1
-              AND session_id = ?2
-              AND created_at BETWEEN ?3 AND ?4
-              AND output_tokens = ?5
-        )",
-        rusqlite::params![
-            upstream.app_type,
-            upstream.session_id,
-            record.created_at.saturating_sub(120),
-            record.created_at.saturating_add(120),
-            record.output_tokens,
-        ],
-        |row| row.get(0),
-    )
-    .map_err(|e| AppError::Database(format!("检查跨客户端重复用量失败: {e}")))
+    Ok(upstream_duplicate_cost(conn, record)?.is_some())
 }
 
 fn remove_desktop_usage_if_upstream_duplicate(
@@ -381,10 +562,12 @@ fn remove_desktop_usage_if_upstream_duplicate(
     Ok(deleted > 0)
 }
 
-fn insert_desktop_usage(db: &Database, record: &DesktopUsageRecord) -> Result<bool, AppError> {
-    let conn = lock_conn!(db.conn);
-    if has_upstream_duplicate(&conn, record)? {
-        return Ok(false);
+fn insert_desktop_usage_outcome_on_conn(
+    conn: &rusqlite::Connection,
+    record: &DesktopUsageRecord,
+) -> Result<DesktopUsageInsertOutcome, AppError> {
+    if let Some(total_cost_usd) = upstream_duplicate_cost(conn, record)? {
+        return Ok(DesktopUsageInsertOutcome::AccountedInUpstreamApp { total_cost_usd });
     }
     let dedup_key = DedupKey {
         app_type: record.app_type,
@@ -395,24 +578,25 @@ fn insert_desktop_usage(db: &Database, record: &DesktopUsageRecord) -> Result<bo
         cache_creation_tokens: record.cache_creation_tokens,
         created_at: record.created_at,
     };
-    if should_skip_session_insert(&conn, &record.request_id, &dedup_key)? {
-        return Ok(false);
+    if should_skip_session_insert(conn, &record.request_id, &dedup_key)? {
+        return Ok(DesktopUsageInsertOutcome::AccountedInSameApp);
     }
 
     let (input_cost, output_cost, cache_read_cost, cache_creation_cost, total_cost) =
-        calculated_costs(&conn, record);
+        calculated_costs(conn, record);
     let inserted = conn
         .execute(
             "INSERT OR IGNORE INTO proxy_request_logs (
-                request_id, provider_id, app_type, model, request_model,
+                request_id, provider_id, app_type, model, request_model, pricing_model,
                 input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+                input_token_semantics,
                 input_cost_usd, output_cost_usd, cache_read_cost_usd,
                 cache_creation_cost_usd, total_cost_usd,
-                latency_ms, first_token_ms, status_code, error_message, session_id,
+                latency_ms, first_token_ms, duration_ms, status_code, error_message, session_id,
                 provider_type, is_streaming, cost_multiplier, created_at, data_source
             ) VALUES (
-                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27
             )",
             rusqlite::params![
                 record.request_id,
@@ -420,10 +604,12 @@ fn insert_desktop_usage(db: &Database, record: &DesktopUsageRecord) -> Result<bo
                 record.app_type,
                 record.model,
                 record.model,
+                (record.app_type == CINDY_APP_TYPE).then_some(record.model.as_str()),
                 record.input_tokens,
                 record.output_tokens,
                 record.cache_read_tokens,
                 record.cache_creation_tokens,
+                INPUT_TOKEN_SEMANTICS_FRESH,
                 input_cost,
                 output_cost,
                 cache_read_cost,
@@ -431,6 +617,7 @@ fn insert_desktop_usage(db: &Database, record: &DesktopUsageRecord) -> Result<bo
                 total_cost,
                 record.latency_ms,
                 record.first_token_ms,
+                record.duration_ms,
                 record.status_code,
                 record.error_message,
                 record.session_id,
@@ -442,7 +629,26 @@ fn insert_desktop_usage(db: &Database, record: &DesktopUsageRecord) -> Result<bo
             ],
         )
         .map_err(|e| AppError::Database(format!("插入桌面 Agent 会话用量失败: {e}")))?;
-    Ok(inserted > 0)
+    Ok(if inserted > 0 {
+        DesktopUsageInsertOutcome::Inserted
+    } else {
+        DesktopUsageInsertOutcome::AccountedInSameApp
+    })
+}
+
+fn insert_desktop_usage_on_conn(
+    conn: &rusqlite::Connection,
+    record: &DesktopUsageRecord,
+) -> Result<bool, AppError> {
+    Ok(matches!(
+        insert_desktop_usage_outcome_on_conn(conn, record)?,
+        DesktopUsageInsertOutcome::Inserted
+    ))
+}
+
+fn insert_desktop_usage(db: &Database, record: &DesktopUsageRecord) -> Result<bool, AppError> {
+    let conn = lock_conn!(db.conn);
+    insert_desktop_usage_on_conn(&conn, record)
 }
 
 fn cindy_user_data_dirs() -> Vec<PathBuf> {
@@ -522,7 +728,10 @@ fn cindy_short_hash(parts: &[&str]) -> String {
 
 fn cindy_sync_key(path: &Path) -> String {
     let path = path.to_string_lossy();
-    format!("desktop:cindy:{}", cindy_short_hash(&[path.as_ref()]))
+    format!(
+        "desktop:cindy:{CINDY_SYNC_VERSION}:{}",
+        cindy_short_hash(&[path.as_ref()])
+    )
 }
 
 fn cindy_source_set_marker(paths: &[PathBuf]) -> i64 {
@@ -544,14 +753,39 @@ fn cindy_provider_id(agent_kind: &str) -> &'static str {
     }
 }
 
-fn cindy_cost_usd(usage: &CindyDailyUsage) -> f64 {
-    if usage.cost_is_approximate {
-        // CC Switch's USD-only ledger has no approximation marker. Importing this
-        // amount would present an estimate as exact spend, so keep only its tokens.
-        return 0.0;
+fn canonical_cindy_model(model: &str) -> String {
+    let mut canonical = model.trim().to_string();
+    if let Some((base, _)) = canonical.split_once("#billing=") {
+        canonical = base.trim().to_string();
     }
+    if let Some(base) = canonical.strip_suffix("[1m]") {
+        canonical = base.trim_end().to_string();
+    }
+    if canonical.is_empty() {
+        "unknown".to_string()
+    } else {
+        canonical
+    }
+}
+
+fn cindy_account_id(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| cindy_short_hash(&[path.to_string_lossy().as_ref()]))
+}
+
+fn cindy_cost_usd(usage: &CindyDailyUsage) -> f64 {
     let legacy_usd = finite_non_negative(Some(usage.cost_usd)).unwrap_or(0.0);
     let current_amount = finite_non_negative(Some(usage.cost_amount)).unwrap_or(0.0);
+    if usage.cost_is_approximate {
+        // Cindy marks subscription/list-price projections as approximate.
+        // Provider stats retain the amount and expose that distinction to the UI.
+        return if usage.cost_currency.eq_ignore_ascii_case("USD") {
+            legacy_usd + current_amount
+        } else {
+            0.0
+        };
+    }
     if usage.cost_currency.eq_ignore_ascii_case("USD") {
         legacy_usd + current_amount
     } else if current_amount > 0.0 {
@@ -567,23 +801,33 @@ fn cindy_token_i64(value: i64) -> i64 {
     value.max(0)
 }
 
-fn read_cindy_daily_usage(source_path: &Path) -> Result<Option<Vec<CindyDailyUsage>>, AppError> {
-    let source = open_source_db(source_path, "Cindy")?;
-    let columns = {
-        let mut statement = source
-            .prepare("PRAGMA table_info(daily_model_usage)")
-            .map_err(|e| AppError::Database(format!("检查 Cindy 用量表失败: {e}")))?;
-        let rows = statement
-            .query_map([], |row| row.get::<_, String>(1))
-            .map_err(|e| AppError::Database(format!("读取 Cindy 用量表结构失败: {e}")))?;
-        let mut columns = std::collections::HashSet::new();
-        for row in rows {
-            columns.insert(
-                row.map_err(|e| AppError::Database(format!("读取 Cindy 用量列失败: {e}")))?,
-            );
-        }
-        columns
-    };
+fn cindy_token_from_u64(value: Option<u64>) -> i64 {
+    value.unwrap_or(0).min(u32::MAX as u64) as i64
+}
+
+fn source_table_columns(
+    source: &rusqlite::Connection,
+    table: &str,
+) -> Result<HashSet<String>, AppError> {
+    let mut statement = source
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(|e| AppError::Database(format!("检查 Cindy {table} 表失败: {e}")))?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|e| AppError::Database(format!("读取 Cindy {table} 表结构失败: {e}")))?;
+    let mut columns = HashSet::new();
+    for row in rows {
+        columns.insert(
+            row.map_err(|e| AppError::Database(format!("读取 Cindy {table} 列失败: {e}")))?,
+        );
+    }
+    Ok(columns)
+}
+
+fn read_cindy_daily_usage_from_conn(
+    source: &rusqlite::Connection,
+) -> Result<Option<Vec<CindyDailyUsage>>, AppError> {
+    let columns = source_table_columns(source, "daily_model_usage")?;
     let required = [
         "day",
         "agent_kind",
@@ -652,18 +896,281 @@ fn read_cindy_daily_usage(source_path: &Path) -> Result<Option<Vec<CindyDailyUsa
     Ok(Some(usage))
 }
 
+fn read_cindy_turn_usage_from_conn(
+    source: &rusqlite::Connection,
+    account_id: &str,
+    detail_cutoff: i64,
+) -> Result<Vec<CindyTurnUsage>, AppError> {
+    let message_columns = source_table_columns(source, "messages")?;
+    let session_columns = source_table_columns(source, "sessions")?;
+    let message_required = ["id", "session_id", "role", "created_at", "agent_meta"];
+    if message_required
+        .iter()
+        .any(|column| !message_columns.contains(*column))
+        || !session_columns.contains("id")
+    {
+        return Ok(Vec::new());
+    }
+
+    let message_agent = if message_columns.contains("agent_kind") {
+        "m.agent_kind"
+    } else {
+        "NULL"
+    };
+    let session_agent = if session_columns.contains("agent_kind") {
+        "COALESCE(s.agent_kind, 'unknown')"
+    } else {
+        "'unknown'"
+    };
+    let session_model = if session_columns.contains("model") {
+        "COALESCE(s.model, 'unknown')"
+    } else {
+        "'unknown'"
+    };
+    let sdk_session_id = if session_columns.contains("sdk_session_id") {
+        "s.sdk_session_id"
+    } else {
+        "NULL"
+    };
+    let parent_session_id = if session_columns.contains("parent_session_id") {
+        "s.parent_session_id"
+    } else {
+        "NULL"
+    };
+    let session_created_at = if session_columns.contains("created_at") {
+        "s.created_at"
+    } else {
+        "0"
+    };
+    let sql = format!(
+        "SELECT m.id, m.session_id, m.created_at, m.agent_meta,
+                {message_agent}, {session_agent}, {session_model}, {sdk_session_id},
+                {parent_session_id}, {session_created_at}
+         FROM messages m
+         JOIN sessions s ON s.id = m.session_id
+         WHERE m.role = 'assistant' AND m.agent_meta IS NOT NULL
+           AND m.created_at >= ?1
+         ORDER BY m.created_at, m.id"
+    );
+    let cutoff_ms = detail_cutoff.saturating_mul(1000);
+    let mut statement = source
+        .prepare(&sql)
+        .map_err(|e| AppError::Database(format!("准备 Cindy turn 查询失败: {e}")))?;
+    let rows = statement
+        .query_map([cutoff_ms], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, Option<String>>(7)?,
+                row.get::<_, Option<String>>(8)?,
+                row.get::<_, i64>(9)?,
+            ))
+        })
+        .map_err(|e| AppError::Database(format!("查询 Cindy turn 失败: {e}")))?;
+
+    let account_hash = cindy_short_hash(&[account_id]);
+    let mut turns = Vec::new();
+    for row in rows {
+        let (
+            message_id,
+            session_id,
+            created_at_ms,
+            agent_meta,
+            message_agent,
+            session_agent,
+            session_model,
+            sdk_session_id,
+            parent_session_id,
+            session_created_at,
+        ) = row.map_err(|e| AppError::Database(format!("读取 Cindy turn 行失败: {e}")))?;
+        if parent_session_id.is_some() && created_at_ms < session_created_at {
+            continue;
+        }
+        let meta: CindyAgentMeta = match serde_json::from_str(&agent_meta) {
+            Ok(meta) => meta,
+            Err(_) => continue,
+        };
+        if meta.turn_completed != Some(true) {
+            continue;
+        }
+        let Some(details) = meta.turn_usage_details else {
+            continue;
+        };
+        if details.models.len() > 1 {
+            continue;
+        }
+        let input_tokens = cindy_token_from_u64(details.input_tokens);
+        let output_tokens = cindy_token_from_u64(details.output_tokens);
+        let cache_read_tokens = cindy_token_from_u64(details.cache_read_tokens);
+        let cache_create_tokens = cindy_token_from_u64(details.cache_create_tokens);
+        if input_tokens == 0
+            && output_tokens == 0
+            && cache_read_tokens == 0
+            && cache_create_tokens == 0
+        {
+            continue;
+        }
+        let Some(created_at) = Local.timestamp_millis_opt(created_at_ms).single() else {
+            continue;
+        };
+        let agent_kind = message_agent
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(session_agent);
+        let model = details
+            .model
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(session_model);
+        let canonical_model = canonical_cindy_model(&model);
+        turns.push(CindyTurnUsage {
+            request_id: format!(
+                "cindy:turn:{}",
+                cindy_short_hash(&[account_id, "turn", &message_id])
+            ),
+            day: created_at.format("%Y-%m-%d").to_string(),
+            agent_kind,
+            model,
+            canonical_model,
+            session_id: format!("cindy:{account_hash}:{session_id}"),
+            sdk_session_id,
+            created_at: created_at.timestamp(),
+            duration_ms: duration_i64(details.duration_ms.or(details.turn_duration_ms)),
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_create_tokens,
+        });
+    }
+    Ok(turns)
+}
+
+fn read_cindy_usage_snapshot(
+    source_path: &Path,
+    detail_cutoff: i64,
+) -> Result<Option<CindyUsageSnapshot>, AppError> {
+    let source = open_source_db(source_path, "Cindy")?;
+    source
+        .execute_batch("BEGIN DEFERRED TRANSACTION")
+        .map_err(|e| AppError::Database(format!("开始 Cindy 只读快照失败: {e}")))?;
+    let Some(daily) = read_cindy_daily_usage_from_conn(&source)? else {
+        return Ok(None);
+    };
+    let account_id = cindy_account_id(source_path);
+    let turns = read_cindy_turn_usage_from_conn(&source, &account_id, detail_cutoff)?;
+    source
+        .execute_batch("COMMIT")
+        .map_err(|e| AppError::Database(format!("提交 Cindy 只读快照失败: {e}")))?;
+    Ok(Some(CindyUsageSnapshot {
+        account_id,
+        daily,
+        turns,
+    }))
+}
+
+fn insert_cindy_daily_rollup(
+    conn: &rusqlite::Connection,
+    key: &CindyUsageKey,
+    model: &str,
+    tokens: CindyTokenBuckets,
+    total_cost_usd: f64,
+) -> Result<(), AppError> {
+    conn.execute(
+        "INSERT INTO usage_daily_rollups (
+            date, app_type, provider_id, model, request_model, pricing_model,
+            request_count, success_count, input_tokens, output_tokens,
+            cache_read_tokens, cache_creation_tokens, input_token_semantics,
+            total_cost_usd, avg_latency_ms
+         ) VALUES (?1, ?2, ?3, ?4, ?4, ?4, 0, 0, ?5, ?6, ?7, ?8, ?9, ?10, 0)
+         ON CONFLICT(date, app_type, provider_id, model, request_model, pricing_model)
+         DO UPDATE SET
+            input_tokens = input_tokens + excluded.input_tokens,
+            output_tokens = output_tokens + excluded.output_tokens,
+            cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens,
+            cache_creation_tokens = cache_creation_tokens + excluded.cache_creation_tokens,
+            input_token_semantics = excluded.input_token_semantics,
+            total_cost_usd = CAST(
+                CAST(total_cost_usd AS REAL) + CAST(excluded.total_cost_usd AS REAL)
+                AS TEXT
+            )",
+        rusqlite::params![
+            key.day,
+            CINDY_APP_TYPE,
+            cindy_provider_id(&key.agent_kind),
+            model,
+            tokens.input,
+            tokens.output,
+            tokens.cache_read,
+            tokens.cache_create,
+            INPUT_TOKEN_SEMANTICS_FRESH,
+            total_cost_usd.to_string(),
+        ],
+    )
+    .map_err(|e| AppError::Database(format!("写入 Cindy 日补差失败: {e}")))?;
+    Ok(())
+}
+
 fn replace_cindy_usage(
     db: &Database,
-    sources: &[(PathBuf, Vec<CindyDailyUsage>)],
+    sources: &[CindyUsageSnapshot],
+    detail_cutoff: i64,
 ) -> Result<(u32, bool), AppError> {
     let mut conn = lock_conn!(db.conn);
+    let detail_cutoff_day = Local
+        .timestamp_opt(detail_cutoff, 0)
+        .single()
+        .ok_or_else(|| AppError::Database("Cindy 明细截止时间无效".to_string()))?
+        .format("%Y-%m-%d")
+        .to_string();
+    let archived_metrics = {
+        let mut statement = conn
+            .prepare(
+                "SELECT date, provider_id, model, request_model, pricing_model,
+                        request_count, success_count
+                 FROM usage_daily_rollups
+                 WHERE app_type = ?1 AND date < ?2 AND request_count > 0",
+            )
+            .map_err(|e| AppError::Database(format!("准备 Cindy 归档指标查询失败: {e}")))?;
+        let rows = statement
+            .query_map(
+                rusqlite::params![CINDY_APP_TYPE, detail_cutoff_day],
+                |row| {
+                    Ok(CindyArchivedRollupMetrics {
+                        date: row.get(0)?,
+                        provider_id: row.get(1)?,
+                        model: row.get(2)?,
+                        request_model: row.get(3)?,
+                        pricing_model: row.get(4)?,
+                        request_count: row.get(5)?,
+                        success_count: row.get(6)?,
+                    })
+                },
+            )
+            .map_err(|e| AppError::Database(format!("查询 Cindy 归档指标失败: {e}")))?;
+        let mut metrics = Vec::new();
+        for row in rows {
+            metrics.push(
+                row.map_err(|e| AppError::Database(format!("读取 Cindy 归档指标失败: {e}")))?,
+            );
+        }
+        metrics
+    };
     let previous_rows: i64 = conn
         .query_row(
             "SELECT
-                (SELECT COUNT(*) FROM proxy_request_logs WHERE app_type = ?1 AND data_source = ?2) +
+                (SELECT COUNT(*) FROM proxy_request_logs
+                 WHERE app_type = ?1 AND data_source IN (?2, ?3)) +
                 (SELECT COUNT(*) FROM usage_daily_rollups WHERE app_type = ?1) +
-                (SELECT COUNT(*) FROM usage_daily_activity_rollups WHERE app_type = ?1)",
-            rusqlite::params![CINDY_APP_TYPE, CINDY_DATA_SOURCE],
+                (SELECT COUNT(*) FROM usage_daily_activity_rollups WHERE app_type = ?1) +
+                (SELECT COUNT(*) FROM usage_daily_activity_session_rollups WHERE app_type = ?1)",
+            rusqlite::params![
+                CINDY_APP_TYPE,
+                CINDY_LEGACY_DATA_SOURCE,
+                CINDY_DETAIL_DATA_SOURCE
+            ],
             |row| row.get(0),
         )
         .map_err(|e| AppError::Database(format!("检查旧 Cindy 用量失败: {e}")))?;
@@ -672,10 +1179,15 @@ fn replace_cindy_usage(
         .map_err(|e| AppError::Database(format!("开始 Cindy 用量同步事务失败: {e}")))?;
     transaction
         .execute(
-            "DELETE FROM proxy_request_logs WHERE app_type = ?1 AND data_source = ?2",
-            rusqlite::params![CINDY_APP_TYPE, CINDY_DATA_SOURCE],
+            "DELETE FROM proxy_request_logs
+             WHERE app_type = ?1 AND data_source IN (?2, ?3)",
+            rusqlite::params![
+                CINDY_APP_TYPE,
+                CINDY_LEGACY_DATA_SOURCE,
+                CINDY_DETAIL_DATA_SOURCE
+            ],
         )
-        .map_err(|e| AppError::Database(format!("清理 Cindy 当日用量失败: {e}")))?;
+        .map_err(|e| AppError::Database(format!("清理 Cindy turn 用量失败: {e}")))?;
     transaction
         .execute(
             "DELETE FROM usage_daily_rollups WHERE app_type = ?1",
@@ -684,20 +1196,23 @@ fn replace_cindy_usage(
         .map_err(|e| AppError::Database(format!("清理 Cindy 历史用量失败: {e}")))?;
     transaction
         .execute(
-            "DELETE FROM usage_daily_activity_rollups WHERE app_type = ?1",
-            [CINDY_APP_TYPE],
+            "DELETE FROM usage_daily_activity_rollups
+             WHERE app_type = ?1 AND date >= ?2",
+            rusqlite::params![CINDY_APP_TYPE, detail_cutoff_day],
         )
         .map_err(|e| AppError::Database(format!("清理 Cindy 活跃用量失败: {e}")))?;
     transaction
         .execute(
-            "DELETE FROM usage_daily_activity_session_rollups WHERE app_type = ?1",
-            [CINDY_APP_TYPE],
+            "DELETE FROM usage_daily_activity_session_rollups
+             WHERE app_type = ?1 AND date >= ?2",
+            rusqlite::params![CINDY_APP_TYPE, detail_cutoff_day],
         )
         .map_err(|e| AppError::Database(format!("清理 Cindy 活跃会话失败: {e}")))?;
 
-    let mut imported = 0u32;
-    for (_, rows) in sources {
-        for usage in rows {
+    let mut daily_by_key: HashMap<CindyUsageKey, CindyDailyAggregate> = HashMap::new();
+    let mut turns_by_key: HashMap<CindyUsageKey, Vec<&CindyTurnUsage>> = HashMap::new();
+    for source in sources {
+        for usage in &source.daily {
             // Cindy's packaged Claude runtime writes the same transcripts under
             // ~/.claude that CC Switch already imports as app_type='claude'.
             // Re-importing its daily bucket here would double-count All totals.
@@ -707,50 +1222,218 @@ fn replace_cindy_usage(
             NaiveDate::parse_from_str(&usage.day, "%Y-%m-%d").map_err(|e| {
                 AppError::Config(format!("Cindy 用量日期格式无效 {}: {e}", usage.day))
             })?;
-            let model = if usage.model.trim().is_empty() {
+            let source_model = if usage.model.trim().is_empty() {
                 "unknown".to_string()
             } else {
                 usage.model.clone()
             };
-            let input_tokens = cindy_token_i64(usage.input_tokens);
-            let output_tokens = cindy_token_i64(usage.output_tokens);
-            let cache_read_tokens = cindy_token_i64(usage.cache_read_tokens);
-            let cache_create_tokens = cindy_token_i64(usage.cache_create_tokens);
-            let total_cost = cindy_cost_usd(usage).to_string();
-
-            transaction
-                .execute(
-                    "INSERT INTO usage_daily_rollups (
-                        date, app_type, provider_id, model, request_model, pricing_model,
-                        request_count, success_count, input_tokens, output_tokens,
-                        cache_read_tokens, cache_creation_tokens, input_token_semantics,
-                        total_cost_usd, avg_latency_ms
-                     ) VALUES (?1, ?2, ?3, ?4, ?4, ?4, 0, 0, ?5, ?6, ?7, ?8, 0, ?9, 0)
-                     ON CONFLICT(date, app_type, provider_id, model, request_model, pricing_model)
-                     DO UPDATE SET
-                        input_tokens = input_tokens + excluded.input_tokens,
-                        output_tokens = output_tokens + excluded.output_tokens,
-                        cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens,
-                        cache_creation_tokens = cache_creation_tokens + excluded.cache_creation_tokens,
-                        total_cost_usd = CAST(
-                            CAST(total_cost_usd AS REAL) + CAST(excluded.total_cost_usd AS REAL)
-                            AS TEXT
-                        )",
-                    rusqlite::params![
-                        usage.day,
-                        CINDY_APP_TYPE,
-                        cindy_provider_id(&usage.agent_kind),
-                        model,
-                        input_tokens,
-                        output_tokens,
-                        cache_read_tokens,
-                        cache_create_tokens,
-                        total_cost,
-                    ],
-                )
-                .map_err(|e| AppError::Database(format!("写入 Cindy 日用量失败: {e}")))?;
-            imported = imported.saturating_add(1);
+            let key = CindyUsageKey {
+                account_id: source.account_id.clone(),
+                day: usage.day.clone(),
+                agent_kind: usage.agent_kind.clone(),
+                canonical_model: canonical_cindy_model(&source_model),
+            };
+            let aggregate = daily_by_key.entry(key).or_default();
+            let tokens = CindyTokenBuckets::from_daily(usage);
+            let total_cost_usd = cindy_cost_usd(usage);
+            aggregate.tokens.add_assign(tokens);
+            aggregate.total_cost_usd += total_cost_usd;
+            let source_model_aggregate = aggregate.source_models.entry(source_model).or_default();
+            source_model_aggregate.tokens.add_assign(tokens);
+            source_model_aggregate.total_cost_usd += total_cost_usd;
         }
+        for usage in &source.turns {
+            if matches!(usage.agent_kind.as_str(), "claude-code" | "cc") {
+                continue;
+            }
+            let key = CindyUsageKey {
+                account_id: source.account_id.clone(),
+                day: usage.day.clone(),
+                agent_kind: usage.agent_kind.clone(),
+                canonical_model: usage.canonical_model.clone(),
+            };
+            turns_by_key.entry(key).or_default().push(usage);
+        }
+    }
+
+    let mut accepted_turn_groups = HashSet::new();
+    for (key, turns) in &turns_by_key {
+        let mut tokens = CindyTokenBuckets::default();
+        for usage in turns {
+            tokens.add_assign(CindyTokenBuckets::from_turn(usage));
+        }
+        let accepted = match daily_by_key.get(key) {
+            Some(daily) if daily.source_models.len() != 1 => {
+                log::warn!(
+                    "[CINDY-SYNC] 明细模型无法唯一映射到日表，回退日汇总: day={}, agent={}, model={}",
+                    key.day,
+                    key.agent_kind,
+                    key.canonical_model
+                );
+                false
+            }
+            Some(daily) if !tokens.fits_within(daily.tokens) => {
+                log::warn!(
+                    "[CINDY-SYNC] 明细 token 超过日表，回退日汇总: day={}, agent={}, model={}",
+                    key.day,
+                    key.agent_kind,
+                    key.canonical_model
+                );
+                false
+            }
+            Some(_) => true,
+            None => {
+                log::warn!(
+                    "[CINDY-SYNC] 明细找不到对应日表，回退日汇总: day={}, agent={}, model={}",
+                    key.day,
+                    key.agent_kind,
+                    key.canonical_model
+                );
+                false
+            }
+        };
+        if accepted {
+            accepted_turn_groups.insert(key.clone());
+        }
+    }
+
+    let mut imported = 0u32;
+    let mut accounted_turn_totals: HashMap<CindyUsageKey, CindyTokenBuckets> = HashMap::new();
+    let mut upstream_turn_costs: HashMap<CindyUsageKey, f64> = HashMap::new();
+    for key in &accepted_turn_groups {
+        let Some(turns) = turns_by_key.get(key) else {
+            continue;
+        };
+        let daily_model = daily_by_key.get(key).and_then(|daily| {
+            daily
+                .source_models
+                .keys()
+                .next()
+                .filter(|_| daily.source_models.len() == 1)
+        });
+        for usage in turns {
+            let model = daily_model.cloned().unwrap_or_else(|| usage.model.clone());
+            let upstream_dedup = usage
+                .sdk_session_id
+                .as_ref()
+                .filter(|session_id| !session_id.trim().is_empty())
+                .and_then(|session_id| {
+                    let app_type = match usage.agent_kind.as_str() {
+                        "codex" => Some("codex"),
+                        "pi" => Some("pi"),
+                        _ => None,
+                    }?;
+                    Some(UpstreamDedup {
+                        app_type,
+                        session_id: session_id.clone(),
+                    })
+                });
+            let record = DesktopUsageRecord {
+                request_id: usage.request_id.clone(),
+                app_type: CINDY_APP_TYPE,
+                data_source: CINDY_DETAIL_DATA_SOURCE,
+                provider_id: cindy_provider_id(&usage.agent_kind),
+                model,
+                session_id: Some(usage.session_id.clone()),
+                input_tokens: usage.input_tokens as u32,
+                output_tokens: usage.output_tokens as u32,
+                cache_read_tokens: usage.cache_read_tokens as u32,
+                cache_creation_tokens: usage.cache_create_tokens as u32,
+                // Keep Cindy's authoritative cost on the daily row. Turn-level
+                // cost is optional/estimated for several agents and mixing the
+                // two sources would make the daily total drift.
+                total_cost_usd: Some(0.0),
+                // Cindy exposes whole-turn wall-clock duration, not provider
+                // request latency. Preserve it separately and keep latency unknown.
+                latency_ms: 0,
+                duration_ms: Some(usage.duration_ms),
+                first_token_ms: None,
+                status_code: 200,
+                error_message: None,
+                created_at: usage.created_at,
+                upstream_dedup,
+            };
+            match insert_desktop_usage_outcome_on_conn(&transaction, &record)? {
+                DesktopUsageInsertOutcome::Inserted => {
+                    imported = imported.saturating_add(1);
+                    accounted_turn_totals
+                        .entry(key.clone())
+                        .or_default()
+                        .add_assign(CindyTokenBuckets::from_turn(usage));
+                }
+                DesktopUsageInsertOutcome::AccountedInSameApp => {
+                    // A Cindy proxy/detail row already carries this usage, so
+                    // subtract it from the daily residual without adding a
+                    // second Cindy row.
+                    accounted_turn_totals
+                        .entry(key.clone())
+                        .or_default()
+                        .add_assign(CindyTokenBuckets::from_turn(usage));
+                }
+                DesktopUsageInsertOutcome::AccountedInUpstreamApp { total_cost_usd } => {
+                    // The native Codex/Pi row already contributes this turn to
+                    // All usage. Count it as accounted so Cindy's residual does
+                    // not reintroduce a cross-app duplicate.
+                    accounted_turn_totals
+                        .entry(key.clone())
+                        .or_default()
+                        .add_assign(CindyTokenBuckets::from_turn(usage));
+                    *upstream_turn_costs.entry(key.clone()).or_default() += total_cost_usd;
+                }
+            }
+        }
+    }
+
+    for (key, daily) in &daily_by_key {
+        if daily.source_models.len() != 1 {
+            for (model, source_model) in &daily.source_models {
+                insert_cindy_daily_rollup(
+                    &transaction,
+                    key,
+                    model,
+                    source_model.tokens,
+                    source_model.total_cost_usd,
+                )?;
+                imported = imported.saturating_add(1);
+            }
+            continue;
+        }
+        let covered = accounted_turn_totals.get(key).copied().unwrap_or_default();
+        let residual = daily.tokens.subtract(covered);
+        let upstream_cost = upstream_turn_costs.get(key).copied().unwrap_or(0.0);
+        let residual_cost = (daily.total_cost_usd - upstream_cost).max(0.0);
+        if residual.is_zero() && residual_cost == 0.0 {
+            continue;
+        }
+        let model = daily
+            .source_models
+            .keys()
+            .next()
+            .cloned()
+            .unwrap_or_else(|| key.canonical_model.clone());
+        insert_cindy_daily_rollup(&transaction, key, &model, residual, residual_cost)?;
+        imported = imported.saturating_add(1);
+    }
+
+    for metrics in archived_metrics {
+        transaction
+            .execute(
+                "UPDATE usage_daily_rollups
+                 SET request_count = ?1, success_count = ?2, avg_latency_ms = 0
+                 WHERE date = ?3 AND app_type = ?4 AND provider_id = ?5
+                   AND model = ?6 AND request_model = ?7 AND pricing_model = ?8",
+                rusqlite::params![
+                    metrics.request_count,
+                    metrics.success_count,
+                    metrics.date,
+                    CINDY_APP_TYPE,
+                    metrics.provider_id,
+                    metrics.model,
+                    metrics.request_model,
+                    metrics.pricing_model,
+                ],
+            )
+            .map_err(|e| AppError::Database(format!("恢复 Cindy 归档指标失败: {e}")))?;
     }
 
     transaction
@@ -762,27 +1445,60 @@ fn replace_cindy_usage(
              )
              SELECT date, app_type, 0, 0,
                     SUM(input_tokens), SUM(output_tokens), SUM(cache_read_tokens),
-                    SUM(cache_creation_tokens), 0,
+                    SUM(cache_creation_tokens), ?2,
                     CAST(SUM(CAST(total_cost_usd AS REAL)) AS TEXT)
              FROM usage_daily_rollups
              WHERE app_type = ?1
-             GROUP BY date, app_type",
-            [CINDY_APP_TYPE],
+             GROUP BY date, app_type
+             ON CONFLICT(date, app_type) DO UPDATE SET
+                input_tokens = excluded.input_tokens,
+                output_tokens = excluded.output_tokens,
+                cache_read_tokens = excluded.cache_read_tokens,
+                cache_creation_tokens = excluded.cache_creation_tokens,
+                input_token_semantics = excluded.input_token_semantics,
+                total_cost_usd = excluded.total_cost_usd",
+            rusqlite::params![CINDY_APP_TYPE, INPUT_TOKEN_SEMANTICS_FRESH],
         )
         .map_err(|e| AppError::Database(format!("汇总 Cindy 活跃用量失败: {e}")))?;
+    transaction
+        .execute(
+            "DELETE FROM usage_daily_activity_rollups
+             WHERE app_type = ?1
+               AND NOT EXISTS (
+                   SELECT 1 FROM usage_daily_rollups r
+                   WHERE r.app_type = ?1
+                     AND r.date = usage_daily_activity_rollups.date
+               )",
+            [CINDY_APP_TYPE],
+        )
+        .map_err(|e| AppError::Database(format!("清理失效 Cindy 活跃日期失败: {e}")))?;
+    transaction
+        .execute(
+            "DELETE FROM usage_daily_activity_session_rollups
+             WHERE app_type = ?1
+               AND NOT EXISTS (
+                   SELECT 1 FROM usage_daily_rollups r
+                   WHERE r.app_type = ?1
+                     AND r.date = usage_daily_activity_session_rollups.date
+               )",
+            [CINDY_APP_TYPE],
+        )
+        .map_err(|e| AppError::Database(format!("清理失效 Cindy 活跃会话失败: {e}")))?;
     transaction
         .commit()
         .map_err(|e| AppError::Database(format!("提交 Cindy 用量同步失败: {e}")))?;
     Ok((imported, previous_rows > 0 || imported > 0))
 }
 
-fn sync_cindy_usage_from_paths(
+fn sync_cindy_usage_from_paths_with_force(
     db: &Database,
     source_paths: &[PathBuf],
+    force_refresh: bool,
 ) -> Result<SessionSyncResult, AppError> {
     let files_scanned = source_paths.len().min(u32::MAX as usize) as u32;
     let source_set_marker = cindy_source_set_marker(source_paths);
-    let mut needs_refresh = get_sync_state(db, CINDY_SOURCE_SET_SYNC_KEY)?.0 != source_set_marker;
+    let mut needs_refresh =
+        force_refresh || get_sync_state(db, CINDY_SOURCE_SET_SYNC_KEY)?.0 != source_set_marker;
     let mut modified_times = Vec::with_capacity(source_paths.len());
     let mut result = empty_result(files_scanned);
 
@@ -807,11 +1523,12 @@ fn sync_cindy_usage_from_paths(
         return Ok(result);
     }
 
+    let detail_cutoff = Database::usage_rollup_cutoff(CINDY_DETAIL_RETAIN_DAYS)?;
     let mut sources = Vec::with_capacity(source_paths.len());
     let mut transient_failure = modified_times.len() != source_paths.len();
     for (path, _) in &modified_times {
-        match read_cindy_daily_usage(path) {
-            Ok(Some(usage)) => sources.push((path.clone(), usage)),
+        match read_cindy_usage_snapshot(path, detail_cutoff) {
+            Ok(Some(usage)) => sources.push(usage),
             Ok(None) => result
                 .errors
                 .push("Cindy 账号用量跳过: 数据库版本尚无 daily_model_usage 表".to_string()),
@@ -828,7 +1545,7 @@ fn sync_cindy_usage_from_paths(
         return Ok(result);
     }
 
-    let (imported, data_changed) = replace_cindy_usage(db, &sources)?;
+    let (imported, data_changed) = replace_cindy_usage(db, &sources, detail_cutoff)?;
     result.imported = imported;
     result.data_changed = data_changed;
     for (path, modified) in modified_times {
@@ -838,7 +1555,7 @@ fn sync_cindy_usage_from_paths(
 
     if result.imported > 0 {
         log::info!(
-            "[CINDY-SYNC] 同步完成: 导入 {} 条日模型聚合, 扫描 {} 个账号数据库",
+            "[CINDY-SYNC] 同步完成: 导入 {} 条 turn/日补差记录, 扫描 {} 个账号数据库",
             result.imported,
             source_paths.len()
         );
@@ -846,9 +1563,21 @@ fn sync_cindy_usage_from_paths(
     Ok(result)
 }
 
+fn sync_cindy_usage_from_paths(
+    db: &Database,
+    source_paths: &[PathBuf],
+) -> Result<SessionSyncResult, AppError> {
+    sync_cindy_usage_from_paths_with_force(db, source_paths, false)
+}
+
 pub fn sync_cindy_usage(db: &Database) -> Result<SessionSyncResult, AppError> {
     let databases = discover_cindy_databases(&cindy_user_data_dirs())?;
     sync_cindy_usage_from_paths(db, &databases)
+}
+
+pub(crate) fn reconcile_cindy_usage(db: &Database) -> Result<SessionSyncResult, AppError> {
+    let databases = discover_cindy_databases(&cindy_user_data_dirs())?;
+    sync_cindy_usage_from_paths_with_force(db, &databases, true)
 }
 
 fn maka_db_path() -> Option<PathBuf> {
@@ -1012,6 +1741,7 @@ fn parse_deepseek_harness_file(
                     cache_creation_tokens,
                     total_cost_usd: None,
                     latency_ms: 0,
+                    duration_ms: None,
                     first_token_ms: None,
                     status_code: 200,
                     error_message: None,
@@ -1292,6 +2022,73 @@ mod tests {
             .unwrap();
     }
 
+    fn create_cindy_turn_tables(source: &Connection) {
+        source
+            .execute_batch(
+                "CREATE TABLE sessions (
+                    id TEXT PRIMARY KEY,
+                    model TEXT NOT NULL,
+                    sdk_session_id TEXT,
+                    agent_kind TEXT NOT NULL,
+                    parent_session_id TEXT,
+                    created_at INTEGER NOT NULL
+                 );
+                 CREATE TABLE messages (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    agent_meta TEXT,
+                    agent_kind TEXT
+                 );",
+            )
+            .unwrap();
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn insert_cindy_turn(
+        source: &Connection,
+        message_id: &str,
+        session_id: &str,
+        created_at_ms: i64,
+        agent_kind: &str,
+        model: &str,
+        input_tokens: i64,
+        output_tokens: i64,
+        cache_read_tokens: i64,
+        cache_create_tokens: i64,
+    ) {
+        source
+            .execute(
+                "INSERT OR IGNORE INTO sessions
+                 (id, model, sdk_session_id, agent_kind, parent_session_id, created_at)
+                 VALUES (?1, ?2, NULL, ?3, NULL, ?4)",
+                rusqlite::params![session_id, model, agent_kind, created_at_ms - 1],
+            )
+            .unwrap();
+        let meta = serde_json::json!({
+            "turnCompleted": true,
+            "turnUsageDetails": {
+                "inputTokens": input_tokens,
+                "outputTokens": output_tokens,
+                "cacheReadTokens": cache_read_tokens,
+                "cacheCreateTokens": cache_create_tokens,
+                "totalTokens": input_tokens + output_tokens + cache_read_tokens + cache_create_tokens,
+                "model": model,
+                "turnDurationMs": 1234
+            }
+        })
+        .to_string();
+        source
+            .execute(
+                "INSERT INTO messages
+                 (id, session_id, role, created_at, agent_meta, agent_kind)
+                 VALUES (?1, ?2, 'assistant', ?3, ?4, ?5)",
+                rusqlite::params![message_id, session_id, created_at_ms, meta, agent_kind],
+            )
+            .unwrap();
+    }
+
     #[test]
     fn maka_uses_cache_miss_as_fresh_input() {
         let record = parse_maka_attempt(
@@ -1342,7 +2139,7 @@ mod tests {
     }
 
     #[test]
-    fn cindy_approximate_cost_is_not_presented_as_exact_usd() {
+    fn cindy_approximate_usd_cost_is_preserved_for_estimated_display() {
         let usage = CindyDailyUsage {
             day: "2020-01-02".to_string(),
             agent_kind: "pi".to_string(),
@@ -1356,7 +2153,7 @@ mod tests {
             cache_read_tokens: 0,
             cache_create_tokens: 0,
         };
-        assert_eq!(cindy_cost_usd(&usage), 0.0);
+        assert!((cindy_cost_usd(&usage) - 0.3).abs() < f64::EPSILON * 2.0);
     }
 
     #[test]
@@ -1398,6 +2195,564 @@ mod tests {
         let databases = discover_cindy_databases(&[canonical, legacy]).unwrap();
 
         assert_eq!(databases, vec![canonical_account, legacy_only]);
+    }
+
+    #[test]
+    fn cindy_sync_prefers_turn_details_and_writes_only_daily_residual() {
+        let dir = tempdir().unwrap();
+        let source_path = dir.path().join("cindy-user-a.db");
+        let source = Connection::open(&source_path).unwrap();
+        create_cindy_usage_table(&source);
+        create_cindy_turn_tables(&source);
+        let now = Local::now();
+        let day = now.format("%Y-%m-%d").to_string();
+        source
+            .execute(
+                "INSERT INTO daily_model_usage VALUES (
+                    ?1, 'pi', 'gpt-test#billing=api', 0, 0, 'USD', 0,
+                    100, 20, 70, 10, ?2
+                 )",
+                rusqlite::params![day, now.timestamp_millis()],
+            )
+            .unwrap();
+        insert_cindy_turn(
+            &source,
+            "message-1",
+            "session-1",
+            now.timestamp_millis(),
+            "pi",
+            "gpt-test",
+            60,
+            10,
+            40,
+            5,
+        );
+        drop(source);
+
+        let db = Database::memory().unwrap();
+        let result = sync_cindy_usage_from_paths(&db, std::slice::from_ref(&source_path)).unwrap();
+        assert_eq!(result.imported, 2);
+
+        let conn = db.conn.lock().unwrap();
+        let detail: (String, i64, i64, i64, i64, i64, i64, Option<i64>) = conn
+            .query_row(
+                "SELECT model, input_tokens, output_tokens, cache_read_tokens,
+                        cache_creation_tokens, input_token_semantics,
+                        latency_ms, duration_ms
+                 FROM proxy_request_logs
+                 WHERE app_type = 'cindy' AND data_source = 'cindy_turn'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            detail,
+            (
+                "gpt-test#billing=api".to_string(),
+                60,
+                10,
+                40,
+                5,
+                2,
+                0,
+                Some(1234),
+            )
+        );
+        let residual: (i64, i64, i64, i64, i64) = conn
+            .query_row(
+                "SELECT input_tokens, output_tokens, cache_read_tokens,
+                        cache_creation_tokens, input_token_semantics
+                 FROM usage_daily_rollups WHERE app_type = 'cindy'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(residual, (40, 10, 30, 5, 2));
+        let totals: (i64, i64, i64, i64) = conn
+            .query_row(
+                "SELECT SUM(input_tokens), SUM(output_tokens),
+                        SUM(cache_read_tokens), SUM(cache_creation_tokens)
+                 FROM (
+                    SELECT input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens
+                    FROM proxy_request_logs WHERE app_type = 'cindy'
+                    UNION ALL
+                    SELECT input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens
+                    FROM usage_daily_rollups WHERE app_type = 'cindy'
+                 )",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(totals, (100, 20, 70, 10));
+    }
+
+    #[test]
+    fn cindy_sync_omits_residual_when_turn_fully_covers_daily_tokens() {
+        let dir = tempdir().unwrap();
+        let source_path = dir.path().join("cindy-user-a.db");
+        let source = Connection::open(&source_path).unwrap();
+        create_cindy_usage_table(&source);
+        create_cindy_turn_tables(&source);
+        let now = Local::now();
+        let day = now.format("%Y-%m-%d").to_string();
+        source
+            .execute(
+                "INSERT INTO daily_model_usage VALUES (
+                    ?1, 'codex', 'gpt-test', 0, 0, 'USD', 0,
+                    60, 10, 40, 5, ?2
+                 )",
+                rusqlite::params![day, now.timestamp_millis()],
+            )
+            .unwrap();
+        insert_cindy_turn(
+            &source,
+            "message-1",
+            "session-1",
+            now.timestamp_millis(),
+            "codex",
+            "gpt-test",
+            60,
+            10,
+            40,
+            5,
+        );
+        drop(source);
+
+        let db = Database::memory().unwrap();
+        let result = sync_cindy_usage_from_paths(&db, &[source_path]).unwrap();
+        assert_eq!(result.imported, 1);
+        let conn = db.conn.lock().unwrap();
+        let counts: (i64, i64) = conn
+            .query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM proxy_request_logs WHERE app_type = 'cindy'),
+                    (SELECT COUNT(*) FROM usage_daily_rollups WHERE app_type = 'cindy')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(counts, (1, 0));
+    }
+
+    #[test]
+    fn cindy_sync_falls_back_to_daily_when_turn_tokens_exceed_daily() {
+        let dir = tempdir().unwrap();
+        let source_path = dir.path().join("cindy-user-a.db");
+        let source = Connection::open(&source_path).unwrap();
+        create_cindy_usage_table(&source);
+        create_cindy_turn_tables(&source);
+        let now = Local::now();
+        let day = now.format("%Y-%m-%d").to_string();
+        source
+            .execute(
+                "INSERT INTO daily_model_usage VALUES (
+                    ?1, 'pi', 'gpt-test', 0, 0, 'USD', 0,
+                    50, 10, 20, 5, ?2
+                 )",
+                rusqlite::params![day, now.timestamp_millis()],
+            )
+            .unwrap();
+        insert_cindy_turn(
+            &source,
+            "message-1",
+            "session-1",
+            now.timestamp_millis(),
+            "pi",
+            "gpt-test",
+            60,
+            10,
+            20,
+            5,
+        );
+        drop(source);
+
+        let db = Database::memory().unwrap();
+        sync_cindy_usage_from_paths(&db, &[source_path]).unwrap();
+        let conn = db.conn.lock().unwrap();
+        let detail_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM proxy_request_logs WHERE app_type = 'cindy'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let fallback: (i64, i64, i64, i64) = conn
+            .query_row(
+                "SELECT input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens
+                 FROM usage_daily_rollups WHERE app_type = 'cindy'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(detail_count, 0);
+        assert_eq!(fallback, (50, 10, 20, 5));
+    }
+
+    #[test]
+    fn cindy_sync_falls_back_to_daily_when_turn_has_no_matching_daily_key() {
+        let dir = tempdir().unwrap();
+        let source_path = dir.path().join("cindy-user-a.db");
+        let source = Connection::open(&source_path).unwrap();
+        create_cindy_usage_table(&source);
+        create_cindy_turn_tables(&source);
+        let now = Local::now();
+        let day = now.format("%Y-%m-%d").to_string();
+        source
+            .execute(
+                "INSERT INTO daily_model_usage VALUES (
+                    ?1, 'pi', 'daily-model', 0, 0, 'USD', 0,
+                    50, 10, 20, 5, ?2
+                 )",
+                rusqlite::params![day, now.timestamp_millis()],
+            )
+            .unwrap();
+        insert_cindy_turn(
+            &source,
+            "message-1",
+            "session-1",
+            now.timestamp_millis(),
+            "pi",
+            "turn-only-model",
+            20,
+            5,
+            10,
+            2,
+        );
+        drop(source);
+
+        let db = Database::memory().unwrap();
+        sync_cindy_usage_from_paths(&db, &[source_path]).unwrap();
+        let conn = db.conn.lock().unwrap();
+        let detail_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM proxy_request_logs WHERE app_type = 'cindy'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let fallback: (String, i64, i64, i64, i64) = conn
+            .query_row(
+                "SELECT model, input_tokens, output_tokens,
+                        cache_read_tokens, cache_creation_tokens
+                 FROM usage_daily_rollups WHERE app_type = 'cindy'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(detail_count, 0);
+        assert_eq!(fallback, ("daily-model".to_string(), 50, 10, 20, 5));
+    }
+
+    #[test]
+    fn cindy_upstream_dedup_requires_model_and_all_token_buckets() {
+        let db = Database::memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO proxy_request_logs (
+                request_id, provider_id, app_type, model,
+                input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+                total_cost_usd, latency_ms, status_code, session_id, created_at
+             ) VALUES (
+                'pi-upstream', 'pi-provider', 'pi', 'gpt-test',
+                10, 2, 3, 4, '0', 0, 200, 'sdk-session', 1700000000
+             )",
+            [],
+        )
+        .unwrap();
+        let mut record = DesktopUsageRecord {
+            request_id: "cindy-turn".to_string(),
+            app_type: CINDY_APP_TYPE,
+            data_source: CINDY_DETAIL_DATA_SOURCE,
+            provider_id: CINDY_PROVIDER_ID,
+            model: "gpt-test".to_string(),
+            session_id: Some("cindy-session".to_string()),
+            input_tokens: 11,
+            output_tokens: 2,
+            cache_read_tokens: 3,
+            cache_creation_tokens: 4,
+            total_cost_usd: Some(0.0),
+            latency_ms: 0,
+            duration_ms: None,
+            first_token_ms: None,
+            status_code: 200,
+            error_message: None,
+            created_at: 1700000000,
+            upstream_dedup: Some(UpstreamDedup {
+                app_type: "pi",
+                session_id: "sdk-session".to_string(),
+            }),
+        };
+
+        assert!(!has_upstream_duplicate(&conn, &record).unwrap());
+        record.input_tokens = 10;
+        record.model = "different-model".to_string();
+        assert!(!has_upstream_duplicate(&conn, &record).unwrap());
+        record.model = "gpt-test#billing=subscription".to_string();
+        assert!(has_upstream_duplicate(&conn, &record).unwrap());
+    }
+
+    #[test]
+    fn forced_cindy_reconcile_removes_pi_duplicate_and_keeps_only_residual_cost() {
+        let dir = tempdir().unwrap();
+        let source_path = dir.path().join("cindy-user-a.db");
+        let source = Connection::open(&source_path).unwrap();
+        create_cindy_usage_table(&source);
+        create_cindy_turn_tables(&source);
+        let now = Local::now();
+        let day = now.format("%Y-%m-%d").to_string();
+        source
+            .execute(
+                "INSERT INTO daily_model_usage VALUES (
+                    ?1, 'pi', 'gpt-test', 0, 0.25, 'USD', 0,
+                    10, 2, 3, 4, ?2
+                 )",
+                rusqlite::params![day, now.timestamp_millis()],
+            )
+            .unwrap();
+        insert_cindy_turn(
+            &source,
+            "message-1",
+            "session-1",
+            now.timestamp_millis(),
+            "pi",
+            "gpt-test",
+            10,
+            2,
+            3,
+            4,
+        );
+        source
+            .execute(
+                "UPDATE sessions SET sdk_session_id = 'sdk-session' WHERE id = 'session-1'",
+                [],
+            )
+            .unwrap();
+        drop(source);
+
+        let db = Database::memory().unwrap();
+        sync_cindy_usage_from_paths(&db, std::slice::from_ref(&source_path)).unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO proxy_request_logs (
+                    request_id, provider_id, app_type, model,
+                    input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+                    total_cost_usd, latency_ms, status_code, session_id, created_at
+                 ) VALUES (
+                    'pi-upstream', 'pi-provider', 'pi', 'gpt-test',
+                    10, 2, 3, 4, '0.2', 0, 200, 'sdk-session', ?1
+                 )",
+                [now.timestamp()],
+            )
+            .unwrap();
+        }
+
+        let unchanged =
+            sync_cindy_usage_from_paths(&db, std::slice::from_ref(&source_path)).unwrap();
+        assert_eq!(unchanged.imported, 0);
+        let reconciled =
+            sync_cindy_usage_from_paths_with_force(&db, std::slice::from_ref(&source_path), true)
+                .unwrap();
+        assert_eq!(reconciled.imported, 1);
+        assert!(reconciled.data_changed);
+        let conn = db.conn.lock().unwrap();
+        let cindy_rows: i64 = conn
+            .query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM proxy_request_logs WHERE app_type = 'cindy') +
+                    (SELECT COUNT(*) FROM usage_daily_rollups WHERE app_type = 'cindy')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(cindy_rows, 1);
+        drop(conn);
+        let all_usage = db.get_usage_summary(None, None, None, None, None).unwrap();
+        assert_eq!(all_usage.total_input_tokens, 10);
+        assert_eq!(all_usage.total_cost, "0.250000");
+    }
+
+    #[test]
+    fn cindy_sync_preserves_daily_model_variants_when_detail_mapping_is_ambiguous() {
+        let dir = tempdir().unwrap();
+        let source_path = dir.path().join("cindy-user-a.db");
+        let source = Connection::open(&source_path).unwrap();
+        create_cindy_usage_table(&source);
+        create_cindy_turn_tables(&source);
+        let now = Local::now();
+        let day = now.format("%Y-%m-%d").to_string();
+        for (model, input) in [
+            ("gpt-test#billing=api", 40i64),
+            ("gpt-test#billing=subscription", 60i64),
+        ] {
+            source
+                .execute(
+                    "INSERT INTO daily_model_usage VALUES (
+                        ?1, 'codex', ?2, 0, 0, 'USD', 0,
+                        ?3, 10, 20, 5, ?4
+                     )",
+                    rusqlite::params![day, model, input, now.timestamp_millis()],
+                )
+                .unwrap();
+        }
+        insert_cindy_turn(
+            &source,
+            "message-1",
+            "session-1",
+            now.timestamp_millis(),
+            "codex",
+            "gpt-test",
+            100,
+            20,
+            40,
+            10,
+        );
+        drop(source);
+
+        let db = Database::memory().unwrap();
+        sync_cindy_usage_from_paths(&db, &[source_path]).unwrap();
+        let conn = db.conn.lock().unwrap();
+        let detail_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM proxy_request_logs WHERE app_type = 'cindy'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let rollup_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM usage_daily_rollups WHERE app_type = 'cindy'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(detail_count, 0);
+        assert_eq!(rollup_count, 2);
+    }
+
+    #[test]
+    fn cindy_sync_ignores_historical_turns_copied_into_fork_sessions() {
+        let dir = tempdir().unwrap();
+        let source_path = dir.path().join("cindy-user-a.db");
+        let source = Connection::open(&source_path).unwrap();
+        create_cindy_usage_table(&source);
+        create_cindy_turn_tables(&source);
+        let now = Local::now();
+        let day = now.format("%Y-%m-%d").to_string();
+        source
+            .execute(
+                "INSERT INTO daily_model_usage VALUES (
+                    ?1, 'codex', 'gpt-test', 0, 0, 'USD', 0,
+                    60, 10, 40, 5, ?2
+                 )",
+                rusqlite::params![day, now.timestamp_millis()],
+            )
+            .unwrap();
+        insert_cindy_turn(
+            &source,
+            "copied-message",
+            "fork-session",
+            now.timestamp_millis() - 1_000,
+            "codex",
+            "gpt-test",
+            60,
+            10,
+            40,
+            5,
+        );
+        source
+            .execute(
+                "UPDATE sessions
+                 SET parent_session_id = 'parent-session', created_at = ?1
+                 WHERE id = 'fork-session'",
+                [now.timestamp_millis()],
+            )
+            .unwrap();
+        drop(source);
+
+        let db = Database::memory().unwrap();
+        sync_cindy_usage_from_paths(&db, &[source_path]).unwrap();
+        let conn = db.conn.lock().unwrap();
+        let counts: (i64, i64) = conn
+            .query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM proxy_request_logs WHERE app_type = 'cindy'),
+                    (SELECT COUNT(*) FROM usage_daily_rollups WHERE app_type = 'cindy')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(counts, (0, 1));
+    }
+
+    #[test]
+    fn cindy_v3_sync_rebuilds_when_only_v2_markers_exist() {
+        let dir = tempdir().unwrap();
+        let source_path = dir.path().join("cindy-user-a.db");
+        let source = Connection::open(&source_path).unwrap();
+        create_cindy_usage_table(&source);
+        source
+            .execute(
+                "INSERT INTO daily_model_usage VALUES (
+                    '2020-01-02', 'pi', 'gpt-test', 0, 0, 'USD', 0,
+                    10, 2, 0, 0, 1577923200000
+                 )",
+                [],
+            )
+            .unwrap();
+        drop(source);
+
+        let db = Database::memory().unwrap();
+        let modified = source_modified_nanos(&source_path).unwrap();
+        let path = source_path.to_string_lossy();
+        let v2_key = format!("desktop:cindy:v2:{}", cindy_short_hash(&[path.as_ref()]));
+        update_sync_state(&db, &v2_key, modified, 0).unwrap();
+        update_sync_state(
+            &db,
+            "desktop:cindy:v2:source-set",
+            cindy_source_set_marker(std::slice::from_ref(&source_path)),
+            0,
+        )
+        .unwrap();
+
+        let result = sync_cindy_usage_from_paths(&db, &[source_path]).unwrap();
+        assert_eq!(result.imported, 1);
+        let conn = db.conn.lock().unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM usage_daily_rollups WHERE app_type = 'cindy'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
     }
 
     #[test]
@@ -1512,6 +2867,7 @@ mod tests {
         let source_path = dir.path().join("cindy-user-a.db");
         let source = Connection::open(&source_path).unwrap();
         create_cindy_usage_table(&source);
+        create_cindy_turn_tables(&source);
         source
             .execute(
                 "INSERT INTO daily_model_usage VALUES (
@@ -1521,6 +2877,18 @@ mod tests {
                 [],
             )
             .unwrap();
+        insert_cindy_turn(
+            &source,
+            "historical-message",
+            "historical-session",
+            1_577_923_200_000,
+            "codex",
+            "gpt-history",
+            100,
+            30,
+            20,
+            10,
+        );
         drop(source);
 
         let db = Database::memory().unwrap();
@@ -1545,6 +2913,122 @@ mod tests {
             )
             .unwrap();
         assert_eq!(detail_count, 0);
+    }
+
+    #[test]
+    fn cindy_resync_preserves_archived_request_and_session_metrics_without_fake_latency() {
+        let dir = tempdir().unwrap();
+        let source_path = dir.path().join("cindy-user-a.db");
+        let source = Connection::open(&source_path).unwrap();
+        create_cindy_usage_table(&source);
+        create_cindy_turn_tables(&source);
+        let now = Local::now();
+        let current_day = now.format("%Y-%m-%d").to_string();
+        source
+            .execute(
+                "INSERT INTO daily_model_usage VALUES (
+                    ?1, 'pi', 'gpt-test', 0, 0, 'USD', 0,
+                    100, 20, 30, 4, ?2
+                 )",
+                rusqlite::params![current_day, now.timestamp_millis()],
+            )
+            .unwrap();
+        insert_cindy_turn(
+            &source,
+            "message-1",
+            "session-1",
+            now.timestamp_millis(),
+            "pi",
+            "gpt-test",
+            100,
+            20,
+            30,
+            4,
+        );
+        drop(source);
+
+        let db = Database::memory().unwrap();
+        sync_cindy_usage_from_paths(&db, std::slice::from_ref(&source_path)).unwrap();
+        let archived_at = Local
+            .with_ymd_and_hms(2020, 1, 2, 12, 0, 0)
+            .single()
+            .unwrap()
+            .timestamp();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE proxy_request_logs
+                 SET created_at = ?1
+                 WHERE app_type = 'cindy' AND data_source = 'cindy_turn'",
+                [archived_at],
+            )
+            .unwrap();
+        }
+        assert_eq!(db.rollup_and_prune(30).unwrap(), 1);
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE usage_daily_rollups
+                 SET avg_latency_ms = 1234
+                 WHERE date = '2020-01-02' AND app_type = 'cindy'",
+                [],
+            )
+            .unwrap();
+        }
+
+        let source = Connection::open(&source_path).unwrap();
+        source
+            .execute(
+                "UPDATE daily_model_usage
+                 SET day = '2020-01-02', updated_at = updated_at + 1",
+                [],
+            )
+            .unwrap();
+        drop(source);
+        update_sync_state(&db, &cindy_sync_key(&source_path), 0, 0).unwrap();
+
+        sync_cindy_usage_from_paths(&db, &[source_path]).unwrap();
+        let conn = db.conn.lock().unwrap();
+        let rollup: (i64, i64, i64, i64, i64, i64, i64) = conn
+            .query_row(
+                "SELECT request_count, success_count, avg_latency_ms,
+                        input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens
+                 FROM usage_daily_rollups
+                 WHERE date = '2020-01-02' AND app_type = 'cindy'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(rollup, (1, 1, 0, 100, 20, 30, 4));
+        let activity: (i64, i64, i64, i64) = conn
+            .query_row(
+                "SELECT request_count, session_count, input_tokens, output_tokens
+                 FROM usage_daily_activity_rollups
+                 WHERE date = '2020-01-02' AND app_type = 'cindy'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(activity, (1, 1, 100, 20));
+        let archived_sessions: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM usage_daily_activity_session_rollups
+                 WHERE date = '2020-01-02' AND app_type = 'cindy'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(archived_sessions, 1);
     }
 
     #[test]
@@ -1721,6 +3205,7 @@ mod tests {
             cache_creation_tokens: 0,
             total_cost_usd: None,
             latency_ms: 0,
+            duration_ms: None,
             first_token_ms: None,
             status_code: 200,
             error_message: None,
@@ -1853,6 +3338,7 @@ mod tests {
             cache_creation_tokens: 0,
             total_cost_usd: None,
             latency_ms: 0,
+            duration_ms: None,
             first_token_ms: None,
             status_code: 200,
             error_message: None,
@@ -1874,6 +3360,7 @@ mod tests {
             cache_creation_tokens: 0,
             total_cost_usd: None,
             latency_ms: 0,
+            duration_ms: None,
             first_token_ms: None,
             status_code: 200,
             error_message: None,

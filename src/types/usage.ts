@@ -103,6 +103,8 @@ export interface UsageSummaryByApp {
 
 export interface DailyStats {
   date: string;
+  granularity: "hour" | "day";
+  isApproximate: boolean;
   requestCount: number;
   totalCost: string;
   totalTokens: number;
@@ -126,8 +128,9 @@ export interface ProviderStats {
   requestCount: number;
   totalTokens: number;
   totalCost: string;
+  costIsApproximate: boolean;
   successRate: number;
-  avgLatencyMs: number;
+  avgLatencyMs: number | null;
 }
 
 export interface ModelStats {

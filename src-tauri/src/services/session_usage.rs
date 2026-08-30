@@ -74,11 +74,16 @@ fn merge_sync_step(
 pub fn sync_all_unlocked(db: &Database) -> SessionSyncResult {
     let mut result = SessionSyncResult::default();
     merge_sync_step(&mut result, "Claude", sync_claude_session_logs(db));
-    merge_sync_step(
-        &mut result,
-        "Codex",
-        crate::services::session_usage_codex::sync_codex_usage(db),
-    );
+    let codex_result = crate::services::session_usage_codex::sync_codex_usage(db);
+    let mut reconcile_cindy = codex_result
+        .as_ref()
+        .is_ok_and(|step| step.imported > 0 || step.data_changed);
+    merge_sync_step(&mut result, "Codex", codex_result);
+    let pi_result = crate::services::session_usage_pi::sync_pi_usage(db);
+    reconcile_cindy |= pi_result
+        .as_ref()
+        .is_ok_and(|step| step.imported > 0 || step.data_changed);
+    merge_sync_step(&mut result, "Pi", pi_result);
     merge_sync_step(
         &mut result,
         "Gemini",
@@ -107,17 +112,16 @@ pub fn sync_all_unlocked(db: &Database) -> SessionSyncResult {
     merge_sync_step(
         &mut result,
         "Cindy",
-        crate::services::session_usage_desktop::sync_cindy_usage(db),
+        if reconcile_cindy {
+            crate::services::session_usage_desktop::reconcile_cindy_usage(db)
+        } else {
+            crate::services::session_usage_desktop::sync_cindy_usage(db)
+        },
     );
     merge_sync_step(
         &mut result,
         "Grok Build",
         crate::services::session_usage_grokbuild::sync_grokbuild_usage(db),
-    );
-    merge_sync_step(
-        &mut result,
-        "Pi",
-        crate::services::session_usage_pi::sync_pi_usage(db),
     );
     notify_sync_result(&result);
     result

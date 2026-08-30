@@ -31,6 +31,18 @@ export function fmtUsd(
   return `$${num.toFixed(digits)}`;
 }
 
+export function formatProviderCost(
+  value: unknown,
+  isApproximate: boolean,
+): string {
+  const formatted = fmtUsd(value, 4);
+  return isApproximate && formatted !== "--" ? `≈${formatted}` : formatted;
+}
+
+export function formatProviderLatency(value: number | null): string {
+  return value == null ? "—" : `${value}ms`;
+}
+
 function normalizeLanguageTag(language: string): string {
   return language.toLowerCase().replace(/_/g, "-");
 }

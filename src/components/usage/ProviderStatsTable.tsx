@@ -8,7 +8,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { useProviderStats } from "@/lib/query/usage";
-import { fmtUsd } from "./format";
+import { formatProviderCost, formatProviderLatency } from "./format";
 import type { UsageRangeSelection } from "@/types/usage";
 
 interface ProviderStatsTableProps {
@@ -84,14 +84,24 @@ export function ProviderStatsTable({
                 <TableCell className="text-right">
                   {stat.totalTokens.toLocaleString()}
                 </TableCell>
-                <TableCell className="text-right">
-                  {fmtUsd(stat.totalCost, 4)}
+                <TableCell
+                  className="text-right"
+                  title={
+                    stat.costIsApproximate
+                      ? t("usage.estimatedCost", "估算成本")
+                      : undefined
+                  }
+                >
+                  {formatProviderCost(
+                    stat.totalCost,
+                    stat.costIsApproximate,
+                  )}
                 </TableCell>
                 <TableCell className="text-right">
                   {stat.successRate.toFixed(1)}%
                 </TableCell>
                 <TableCell className="text-right">
-                  {stat.avgLatencyMs}ms
+                  {formatProviderLatency(stat.avgLatencyMs)}
                 </TableCell>
               </TableRow>
             ))

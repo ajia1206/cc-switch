@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildUsageTrendChartData,
   formatUsageTrendTickLabel,
+  resolveUsageTrendPresentation,
 } from "@/components/usage/UsageTrendChart";
 
 const day = (isoDate: string) =>
@@ -69,6 +70,46 @@ describe("buildUsageTrendChartData (#6302)", () => {
     // en-US 2-digit month/day — should not need a year prefix inside one year.
     expect(points[0].label).not.toMatch(/2026/);
     expect(points[0].tooltipLabel).toMatch(/2026/);
+  });
+
+  it("preserves the daily fallback marker for the chart tooltip", () => {
+    const startDate = Math.floor(Date.parse("2026-04-27T00:00:00Z") / 1000);
+    const endDate = Math.floor(Date.parse("2026-04-27T23:59:59Z") / 1000);
+    const points = buildUsageTrendChartData(
+      [{ ...day("2026-04-27"), isApproximate: true }],
+      { isHourly: false, dateLocale: "en-US", startDate, endDate },
+    );
+
+    expect(points[0].isApproximate).toBe(true);
+  });
+});
+
+describe("resolveUsageTrendPresentation", () => {
+  it("uses backend daily granularity and exposes the fallback hint for a short range", () => {
+    const presentation = resolveUsageTrendPresentation(
+      [
+        {
+          ...day("2026-04-27"),
+          granularity: "day",
+          isApproximate: true,
+        },
+      ],
+      60 * 60,
+    );
+
+    expect(presentation).toEqual({
+      isHourly: false,
+      containsDailyFallback: true,
+    });
+  });
+
+  it("keeps legacy short-range responses hourly when granularity is absent", () => {
+    expect(resolveUsageTrendPresentation([day("2026-04-27")], 60 * 60)).toEqual(
+      {
+        isHourly: true,
+        containsDailyFallback: false,
+      },
+    );
   });
 });
 

@@ -193,11 +193,19 @@ function parseTrendDate(date: string) {
   return null;
 }
 
-function trendLabel(date: string, lang: string, preset: TrayRangePreset) {
+function trendLabel(
+  date: string,
+  lang: string,
+  preset: TrayRangePreset,
+  granularity?: DailyStats["granularity"],
+) {
   const parsed = parseTrendDate(date);
   if (!parsed) return date;
 
-  if (preset === "today" && date.includes(":")) {
+  const isHourly =
+    granularity === "hour" ||
+    (granularity === undefined && preset === "today" && date.includes(":"));
+  if (isHourly) {
     return `${String(parsed.getHours()).padStart(2, "0")}:00`;
   }
 
@@ -1254,6 +1262,7 @@ function TrendBars({
   rangePreset: TrayRangePreset;
   theme: TrayVisualTheme;
 }) {
+  const { t } = useTranslation();
   if (items.length === 0) {
     return <EmptyRow theme={theme}>{emptyLabel}</EmptyRow>;
   }
@@ -1261,6 +1270,7 @@ function TrendBars({
   const max = Math.max(1, ...items.map(trendTotalTokens));
   const compact = items.length <= 3;
   const isCardTheme = theme === "card";
+  const containsDailyFallback = items.some((item) => item.isApproximate);
 
   return (
     <div>
@@ -1348,10 +1358,15 @@ function TrendBars({
               compact ? "w-8" : "flex-1",
             )}
           >
-            {trendLabel(day.date, lang, rangePreset)}
+            {trendLabel(day.date, lang, rangePreset, day.granularity)}
           </div>
         ))}
       </div>
+      {containsDailyFallback && (
+        <p className="mt-1.5 text-[9px] text-amber-600 dark:text-amber-400">
+          {t("usage.dailyFallbackHint", "包含日级汇总，时间精度为天")}
+        </p>
+      )}
     </div>
   );
 }

@@ -56,11 +56,20 @@ fn compute_local_midnight_cutoff(
 }
 
 impl Database {
+    /// Return the same local-midnight cutoff used by detail pruning.
+    ///
+    /// Session importers that rebuild authoritative source data must use this
+    /// boundary too, otherwise an import after pruning can resurrect archived
+    /// detail rows.
+    pub(crate) fn usage_rollup_cutoff(retain_days: i64) -> Result<i64, AppError> {
+        compute_local_midnight_cutoff(Local::now(), retain_days)
+    }
+
     /// Aggregate proxy_request_logs older than `retain_days` into usage_daily_rollups,
     /// then delete the aggregated detail rows.
     /// Returns the number of deleted detail rows.
     pub fn rollup_and_prune(&self, retain_days: i64) -> Result<u64, AppError> {
-        let cutoff = compute_local_midnight_cutoff(Local::now(), retain_days)?;
+        let cutoff = Self::usage_rollup_cutoff(retain_days)?;
         let conn = lock_conn!(self.conn);
 
         // Check if there are any rows to process

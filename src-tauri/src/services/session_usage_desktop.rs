@@ -39,8 +39,8 @@ const CINDY_APP_TYPE: &str = "cindy";
 const CINDY_LEGACY_DATA_SOURCE: &str = "cindy_daily";
 const CINDY_DETAIL_DATA_SOURCE: &str = "cindy_turn";
 const CINDY_PROVIDER_ID: &str = "_cindy_session";
-const CINDY_SYNC_VERSION: &str = "v4";
-const CINDY_SOURCE_SET_SYNC_KEY: &str = "desktop:cindy:v4:source-set";
+const CINDY_SYNC_VERSION: &str = "v5";
+const CINDY_SOURCE_SET_SYNC_KEY: &str = "desktop:cindy:v5:source-set";
 const CINDY_DETAIL_RETAIN_DAYS: i64 = 30;
 
 #[derive(Debug)]
@@ -888,6 +888,13 @@ fn cindy_provider_id(agent_kind: &str) -> &'static str {
     }
 }
 
+fn canonical_cindy_agent_kind(agent_kind: &str) -> &str {
+    match agent_kind {
+        "cc" | "claude-code" => "claude-code",
+        _ => agent_kind,
+    }
+}
+
 fn canonical_cindy_model(model: &str) -> String {
     let mut canonical = model.trim().to_string();
     if let Some((base, _)) = canonical.split_once("#billing=") {
@@ -1396,7 +1403,7 @@ fn replace_cindy_usage(
             let key = CindyUsageKey {
                 account_id: source.account_id.clone(),
                 day: usage.day.clone(),
-                agent_kind: usage.agent_kind.clone(),
+                agent_kind: canonical_cindy_agent_kind(&usage.agent_kind).to_string(),
                 canonical_model: canonical_cindy_model(&source_model),
             };
             let aggregate = daily_by_key.entry(key).or_default();
@@ -1410,7 +1417,7 @@ fn replace_cindy_usage(
             let key = CindyUsageKey {
                 account_id: source.account_id.clone(),
                 day: usage.day.clone(),
-                agent_kind: usage.agent_kind.clone(),
+                agent_kind: canonical_cindy_agent_kind(&usage.agent_kind).to_string(),
                 canonical_model: usage.canonical_model.clone(),
             };
             turns_by_key.entry(key).or_default().push(usage);
@@ -2966,7 +2973,7 @@ mod tests {
             "claude-message",
             "claude-session",
             now.timestamp_millis(),
-            "claude-code",
+            "cc",
             "claude-opus-4-1",
             100,
             20,
@@ -3108,7 +3115,7 @@ mod tests {
     }
 
     #[test]
-    fn cindy_v4_sync_rebuilds_when_only_v3_markers_exist() {
+    fn cindy_v5_sync_rebuilds_when_only_v4_markers_exist() {
         let dir = tempdir().unwrap();
         let source_path = dir.path().join("cindy-user-a.db");
         let source = Connection::open(&source_path).unwrap();
@@ -3127,11 +3134,11 @@ mod tests {
         let db = Database::memory().unwrap();
         let modified = source_modified_nanos(&source_path).unwrap();
         let path = source_path.to_string_lossy();
-        let v3_key = format!("desktop:cindy:v3:{}", cindy_short_hash(&[path.as_ref()]));
-        update_sync_state(&db, &v3_key, modified, 0).unwrap();
+        let v4_key = format!("desktop:cindy:v4:{}", cindy_short_hash(&[path.as_ref()]));
+        update_sync_state(&db, &v4_key, modified, 0).unwrap();
         update_sync_state(
             &db,
-            "desktop:cindy:v3:source-set",
+            "desktop:cindy:v4:source-set",
             cindy_source_set_marker(std::slice::from_ref(&source_path)),
             0,
         )

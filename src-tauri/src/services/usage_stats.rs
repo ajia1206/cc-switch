@@ -243,6 +243,8 @@ fn provider_name_coalesce(log_alias: &str, provider_alias: &str) -> String {
 }
 
 pub(crate) const SESSION_PROXY_DEDUP_WINDOW_SECONDS: i64 = 10 * 60;
+pub(crate) const CINDY_MIRROR_DATA_SOURCE: &str = "cindy_turn_mirror";
+pub(crate) const CINDY_MIRROR_REQUEST_MODEL: &str = "__cindy_upstream_mirror__";
 
 /// SQL 片段：把指定别名的 `data_source` 包成 COALESCE，NULL 视作 'proxy'。
 ///
@@ -324,7 +326,7 @@ fn push_provider_model_filters(
     }
 }
 
-pub(crate) fn effective_usage_log_filter(log_alias: &str) -> String {
+fn effective_usage_log_dedup_filter(log_alias: &str) -> String {
     let data_source = data_source_expr(log_alias);
     let proxy_data_source = data_source_expr("proxy_dedup");
     let app_type_match =
@@ -360,6 +362,38 @@ pub(crate) fn effective_usage_log_filter(log_alias: &str) -> String {
             )
         )"
     )
+}
+
+fn effective_usage_log_filter_for_app(log_alias: &str, app_type: Option<&str>) -> String {
+    let data_source = data_source_expr(log_alias);
+    let dedup_filter = effective_usage_log_dedup_filter(log_alias);
+    if app_type.is_some_and(|value| value.eq_ignore_ascii_case("cindy")) {
+        dedup_filter
+    } else {
+        format!("({dedup_filter}) AND {data_source} <> '{CINDY_MIRROR_DATA_SOURCE}'")
+    }
+}
+
+pub(crate) fn effective_usage_log_filter(log_alias: &str) -> String {
+    effective_usage_log_filter_for_app(log_alias, None)
+}
+
+/// 归档主汇总需要保留 Cindy 归因镜像，借助 request_model 标记让查询层决定
+/// 是否展示；活跃度和全局明细仍使用 [`effective_usage_log_filter`] 排除镜像。
+pub(crate) fn usage_rollup_log_filter(log_alias: &str) -> String {
+    effective_usage_log_dedup_filter(log_alias)
+}
+
+fn push_cindy_mirror_rollup_filter(
+    conditions: &mut Vec<String>,
+    rollup_alias: &str,
+    app_type: Option<&str>,
+) {
+    if !app_type.is_some_and(|value| value.eq_ignore_ascii_case("cindy")) {
+        conditions.push(format!(
+            "NOT ({rollup_alias}.app_type = 'cindy' AND {rollup_alias}.request_model = '{CINDY_MIRROR_REQUEST_MODEL}')"
+        ));
+    }
 }
 
 /// 跨源去重指纹键。
@@ -675,6 +709,7 @@ fn has_cindy_rollup_for_range(
         &bounds.coarse_end,
         bounds.coarse_is_empty,
     ));
+    push_cindy_mirror_rollup_filter(&mut conditions, "r", app_type);
     push_provider_model_filters(&mut conditions, &mut params, "r", "p", provider_name, model);
     let provider_join = if provider_name.is_some() {
         providers_join("r", "p")
@@ -741,7 +776,7 @@ impl Database {
         let conn = lock_conn!(self.conn);
 
         // Build detail WHERE clause
-        let mut conditions = vec![effective_usage_log_filter("l")];
+        let mut conditions = vec![effective_usage_log_filter_for_app("l", app_type)];
         let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
         if let Some(start) = start_date {
@@ -788,6 +823,7 @@ impl Database {
             "r.app_type",
             &rollup_bounds,
         );
+        push_cindy_mirror_rollup_filter(&mut rollup_conditions, "r", app_type);
         if let Some(at) = app_type {
             rollup_conditions.push(format!("{} = ?", folded_app_type_sql("r.app_type")));
             rollup_params.push(Box::new(at.to_string()));
@@ -936,6 +972,7 @@ impl Database {
             "r.app_type",
             &rollup_bounds,
         );
+        push_cindy_mirror_rollup_filter(&mut rollup_conditions, "r", None);
         push_provider_model_filters(
             &mut rollup_conditions,
             &mut rollup_params,
@@ -1113,7 +1150,7 @@ impl Database {
                 String::new()
             };
 
-            let effective_filter = effective_usage_log_filter("l");
+            let effective_filter = effective_usage_log_filter_for_app("l", app_type);
             let fresh_input = fresh_input_sql("l");
             let sql = format!(
                 "SELECT
@@ -1230,7 +1267,7 @@ impl Database {
             String::new()
         };
 
-        let effective_filter = effective_usage_log_filter("l");
+        let effective_filter = effective_usage_log_filter_for_app("l", app_type);
         let fresh_input = fresh_input_sql("l");
         let detail_sql = format!(
             "SELECT
@@ -1293,6 +1330,7 @@ impl Database {
             "r.app_type",
             &rollup_bounds,
         );
+        push_cindy_mirror_rollup_filter(&mut rollup_conditions, "r", app_type);
         if let Some(at) = app_type {
             rollup_conditions.push(format!("{} = ?", folded_app_type_sql("r.app_type")));
             rollup_params.push(Box::new(at.to_string()));
@@ -1433,7 +1471,7 @@ impl Database {
         let mut detail_conditions = vec![
             "l.created_at >= ?".to_string(),
             "l.created_at <= ?".to_string(),
-            effective_usage_log_filter("l"),
+            effective_usage_log_filter_for_app("l", app_type),
         ];
         let mut detail_params: Vec<Box<dyn rusqlite::ToSql>> =
             vec![Box::new(start_ts), Box::new(end_ts)];
@@ -1541,6 +1579,7 @@ impl Database {
             "r.app_type",
             &rollup_bounds,
         );
+        push_cindy_mirror_rollup_filter(&mut legacy_rollup_conditions, "r", app_type);
         if let Some(at) = app_type {
             legacy_rollup_conditions.push("r.app_type = ?".to_string());
             legacy_rollup_params.push(Box::new(at.to_string()));
@@ -1624,7 +1663,7 @@ impl Database {
     ) -> Result<Vec<ProviderStats>, AppError> {
         let conn = lock_conn!(self.conn);
 
-        let mut detail_conditions = vec![effective_usage_log_filter("l")];
+        let mut detail_conditions = vec![effective_usage_log_filter_for_app("l", app_type)];
         let mut detail_params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
         if let Some(start) = start_date {
             detail_conditions.push("l.created_at >= ?".to_string());
@@ -1662,6 +1701,7 @@ impl Database {
             "r.app_type",
             &rollup_bounds,
         );
+        push_cindy_mirror_rollup_filter(&mut rollup_conditions, "r", app_type);
         if let Some(at) = app_type {
             rollup_conditions.push(format!("{} = ?", folded_app_type_sql("r.app_type")));
             rollup_params.push(Box::new(at.to_string()));
@@ -1784,7 +1824,7 @@ impl Database {
     ) -> Result<Vec<ModelStats>, AppError> {
         let conn = lock_conn!(self.conn);
 
-        let mut detail_conditions = vec![effective_usage_log_filter("l")];
+        let mut detail_conditions = vec![effective_usage_log_filter_for_app("l", app_type)];
         let mut detail_params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
         if let Some(start) = start_date {
             detail_conditions.push("l.created_at >= ?".to_string());
@@ -1827,6 +1867,7 @@ impl Database {
             "r.app_type",
             &rollup_bounds,
         );
+        push_cindy_mirror_rollup_filter(&mut rollup_conditions, "r", app_type);
         if let Some(at) = app_type {
             rollup_conditions.push(format!("{} = ?", folded_app_type_sql("r.app_type")));
             rollup_params.push(Box::new(at.to_string()));
@@ -1930,7 +1971,10 @@ impl Database {
     ) -> Result<PaginatedLogs, AppError> {
         let conn = lock_conn!(self.conn);
 
-        let mut conditions = vec![effective_usage_log_filter("l")];
+        let mut conditions = vec![effective_usage_log_filter_for_app(
+            "l",
+            filters.app_type.as_deref(),
+        )];
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
         if let Some(ref app_type) = filters.app_type {
@@ -2195,7 +2239,7 @@ impl Database {
                         data_source, pricing_model, input_token_semantics
              FROM proxy_request_logs
              WHERE CAST(total_cost_usd AS REAL) <= 0
-               AND NOT (app_type = 'cindy' AND data_source = 'cindy_turn')
+               AND NOT (app_type = 'cindy' AND data_source IN ('cindy_turn', 'cindy_turn_mirror'))
                AND (input_tokens > 0 OR output_tokens > 0
                     OR cache_read_tokens > 0 OR cache_creation_tokens > 0)";
 

@@ -122,9 +122,13 @@ fn merge_sync_step(
 /// 手动同步和 Codex 重建共享，避免 tokio Mutex 重入。
 pub fn sync_all_unlocked(db: &Database) -> SessionSyncResult {
     let mut result = SessionSyncResult::default();
-    merge_sync_step(&mut result, "Claude", sync_claude_session_logs(db));
+    let claude_result = sync_claude_session_logs(db);
+    let mut reconcile_cindy = claude_result
+        .as_ref()
+        .is_ok_and(|step| step.imported > 0 || step.data_changed);
+    merge_sync_step(&mut result, "Claude", claude_result);
     let codex_result = crate::services::session_usage_codex::sync_codex_usage(db);
-    let mut reconcile_cindy = codex_result
+    reconcile_cindy |= codex_result
         .as_ref()
         .is_ok_and(|step| step.imported > 0 || step.data_changed);
     merge_sync_step(&mut result, "Codex", codex_result);
@@ -171,6 +175,19 @@ pub fn sync_all_unlocked(db: &Database) -> SessionSyncResult {
         &mut result,
         "Grok Build",
         crate::services::session_usage_grokbuild::sync_grokbuild_usage(db),
+    );
+    notify_sync_result(&result);
+    result
+}
+
+/// 仅同步 Cindy 自有数据库。手动会话扫描模式仍需要这条本地数据库刷新链路，
+/// 否则 Dashboard 会在用户关闭 Claude/Codex 文件扫描后永久停留在旧统计。
+pub fn sync_cindy_unlocked(db: &Database) -> SessionSyncResult {
+    let mut result = SessionSyncResult::default();
+    merge_sync_step(
+        &mut result,
+        "Cindy",
+        crate::services::session_usage_desktop::sync_cindy_usage(db),
     );
     notify_sync_result(&result);
     result
@@ -756,9 +773,8 @@ fn update_claude_sync_state_on_conn(
 
 /// 获取 session_log_sync 表中某条目的同步进度。
 ///
-/// 生产路径已改为 [`load_sync_cursors`] 批量预取；保留此单行查询给测试
-/// 断言游标状态用。
-#[cfg(test)]
+/// Claude 扫描使用 [`load_sync_cursors`] 批量预取；桌面数据库来源仍用稳定键
+/// 单条读取，避免把外部数据库状态混入文件游标批处理。
 pub(crate) fn get_sync_state(db: &Database, file_path: &str) -> Result<(i64, i64), AppError> {
     let conn = lock_conn!(db.conn);
     let result = conn.query_row(

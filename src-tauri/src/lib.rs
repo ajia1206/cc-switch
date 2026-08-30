@@ -1381,11 +1381,6 @@ pub fn run() {
                     const SESSION_SYNC_INTERVAL_SECS: u64 = 60;
 
                     async fn run_session_sync(db: std::sync::Arc<crate::database::Database>, backfill: bool) {
-                        // 手动扫描模式下跳过定时扫描；backfill 轮（启动首轮）仍进入，
-                        // 费用回填只修补数据库既有行（含代理记账行），不读会话文件
-                        if !backfill && !crate::settings::get_settings().session_auto_sync_enabled {
-                            return;
-                        }
                         let _guard = crate::services::session_usage::session_sync_mutex()
                             .lock()
                             .await;
@@ -1395,10 +1390,11 @@ pub fn run() {
                                     log::warn!("Usage cost startup backfill failed: {error}");
                                 }
                             }
-                            if !crate::settings::get_settings().session_auto_sync_enabled {
-                                return crate::services::session_usage::SessionSyncResult::default();
+                            if crate::settings::get_settings().session_auto_sync_enabled {
+                                crate::services::session_usage::sync_all_unlocked(&db)
+                            } else {
+                                crate::services::session_usage::sync_cindy_unlocked(&db)
                             }
-                            crate::services::session_usage::sync_all_unlocked(&db)
                         });
                         match task.await {
                             Ok(result) => {

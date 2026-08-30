@@ -5,7 +5,7 @@
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
 use crate::services::sql_helpers::{fresh_input_sql, INPUT_TOKEN_SEMANTICS_FRESH};
-use crate::services::usage_stats::effective_usage_log_filter;
+use crate::services::usage_stats::{effective_usage_log_filter, usage_rollup_log_filter};
 use chrono::{Duration, Local, TimeZone};
 
 /// Compute the rollup/prune cutoff aligned to a local-day boundary.
@@ -125,6 +125,7 @@ impl Database {
     fn do_rollup_and_prune(conn: &rusqlite::Connection, cutoff: i64) -> Result<u64, AppError> {
         // Aggregate old logs, merging with any pre-existing rollup rows via LEFT JOIN.
         let effective_filter = effective_usage_log_filter("l");
+        let aggregation_filter = usage_rollup_log_filter("l");
         let fresh_detail_input = fresh_input_sql("l");
         let fresh_old_input = fresh_input_sql("old");
         // request_model 维度保留路由接管的「客户端别名 → 真实模型」映射，
@@ -167,7 +168,7 @@ impl Database {
                     COALESCE(SUM(CAST(l.total_cost_usd AS REAL)), 0) as new_cost,
                     COALESCE(AVG(l.latency_ms), 0) as new_lat
                 FROM proxy_request_logs l
-                WHERE l.created_at < ?1 AND {effective_filter}
+                WHERE l.created_at < ?1 AND {aggregation_filter}
                 GROUP BY d, a, p, m, rm, pm
             ) agg
             LEFT JOIN usage_daily_rollups old

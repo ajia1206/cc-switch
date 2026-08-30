@@ -26,7 +26,7 @@ use crate::services::usage_stats::{
 };
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::{BufRead, BufReader};
 #[cfg(unix)]
@@ -52,7 +52,7 @@ struct CumulativeTokens {
 }
 
 /// 单次 API 调用的 token 增量
-#[derive(Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct DeltaTokens {
     input: u32,
     cached_input: u32,
@@ -209,12 +209,30 @@ enum ParentResolution {
 #[derive(Debug)]
 struct ParsedCodexFile {
     root_thread_id: Option<String>,
+    owner_session_id: Option<String>,
     root_meta_seen: bool,
     root_timestamp: Option<DateTime<Utc>>,
     parent: ParentResolution,
     token_events: Vec<ParsedTokenEvent>,
     line_offset: i64,
     has_billable_tokens: bool,
+}
+
+/// A single billable model request reconstructed with the same parser used by
+/// the ordinary Codex session importer. Cindy uses this read-only projection
+/// for its managed CODEX_HOME so its request count has the same meaning as the
+/// `Codex (Session)` provider.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CodexSessionUsageEvent {
+    pub request_id: String,
+    pub thread_id: String,
+    pub owner_session_id: String,
+    pub model: String,
+    pub created_at_ms: i64,
+    /// Codex reports total input here, including cached input.
+    pub input_tokens: u32,
+    pub cached_input_tokens: u32,
+    pub output_tokens: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -738,6 +756,92 @@ fn build_rollout_index(files: &[PathBuf]) -> RolloutIndex {
     index
 }
 
+/// Replays a Codex home without touching CC Switch cursors or usage rows.
+///
+/// This intentionally shares `parse_codex_file` and the parent-replay
+/// exclusion with the ordinary Codex importer. Callers therefore get one row
+/// per non-zero provider request, rather than one row per agent turn.
+pub(crate) fn read_codex_usage_events(
+    codex_dir: &Path,
+) -> Result<Vec<CodexSessionUsageEvent>, AppError> {
+    let files = collect_codex_session_files(codex_dir);
+    let rollout_index = build_rollout_index(&files);
+    let mut events = BTreeMap::<String, CodexSessionUsageEvent>::new();
+
+    for file_path in files {
+        let parsed = parse_codex_file(&file_path, thread_id_from_filename(&file_path))?;
+        if !parsed.has_billable_tokens {
+            continue;
+        }
+        let Some(thread_id) = parsed.root_thread_id.as_deref() else {
+            continue;
+        };
+        if !parsed.root_meta_seen {
+            continue;
+        }
+        let owner_session_id = parsed
+            .owner_session_id
+            .as_deref()
+            .unwrap_or(thread_id)
+            .to_string();
+        let replay_prefix = match &parsed.parent {
+            ParentResolution::None => 0,
+            ParentResolution::Deferred(_) => continue,
+            ParentResolution::Parent(parent_id) => {
+                let Some(cutoff) = parsed.root_timestamp else {
+                    continue;
+                };
+                let parent_signatures =
+                    match resolve_parent_signatures(parent_id, cutoff, &rollout_index) {
+                        Ok(signatures) => signatures,
+                        Err(_) => continue,
+                    };
+                matching_replay_prefix(&parsed.token_events, &parent_signatures)
+            }
+        };
+
+        for (token_offset, event) in parsed.token_events.iter().enumerate() {
+            if token_offset < replay_prefix {
+                continue;
+            }
+            let Some(event_index) = event.event_index else {
+                continue;
+            };
+            let Some(created_at_ms) = event.timestamp.as_deref().and_then(|timestamp| {
+                DateTime::parse_from_rfc3339(timestamp)
+                    .ok()
+                    .map(|value| value.timestamp_millis())
+            }) else {
+                continue;
+            };
+            let request_id = format!("{CODEX_THREAD_REQUEST_ID_PREFIX}:{thread_id}:{event_index}");
+            let usage = CodexSessionUsageEvent {
+                request_id: request_id.clone(),
+                thread_id: thread_id.to_string(),
+                owner_session_id: owner_session_id.clone(),
+                model: event.model.clone(),
+                created_at_ms,
+                input_tokens: event.delta.input,
+                cached_input_tokens: event.delta.cached_input,
+                output_tokens: event.delta.output,
+            };
+            match events.get(&request_id) {
+                Some(existing) if existing != &usage => {
+                    return Err(AppError::Config(format!(
+                        "Codex request id maps to conflicting usage: {request_id}"
+                    )));
+                }
+                Some(_) => {}
+                None => {
+                    events.insert(request_id, usage);
+                }
+            }
+        }
+    }
+
+    Ok(events.into_values().collect())
+}
+
 /// 递归扫描目录下的 .jsonl 文件（限制最大深度）
 fn collect_jsonl_recursive(dir: &Path, files: &mut Vec<PathBuf>, depth: u32, max_depth: u32) {
     let entries = match fs::read_dir(dir) {
@@ -764,6 +868,7 @@ fn parse_codex_file(
     let reader = BufReader::new(file);
     let mut root_meta_seen = false;
     let mut root_timestamp = None;
+    let mut owner_session_id = None;
     let mut parent = ParentResolution::None;
     let mut current_model = "unknown".to_string();
     // `total_token_usage` is session-cumulative, including across model and
@@ -829,6 +934,11 @@ fn parse_codex_file(
                 root_meta_seen = true;
                 root_timestamp = parse_timestamp(value.get("timestamp"));
                 let payload = value.get("payload").unwrap_or(&serde_json::Value::Null);
+                owner_session_id = non_empty_string(
+                    payload
+                        .get("session_id")
+                        .or_else(|| payload.get("sessionId")),
+                );
                 parent = explicit_parent_from_meta(payload);
 
                 let meta_thread_id = non_empty_string(
@@ -972,6 +1082,7 @@ fn parse_codex_file(
 
     Ok(ParsedCodexFile {
         root_thread_id,
+        owner_session_id,
         root_meta_seen,
         root_timestamp,
         parent,

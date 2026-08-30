@@ -1743,7 +1743,11 @@ impl Database {
                     COALESCE(SUM({fresh_input_detail} + l.output_tokens + l.cache_creation_tokens + l.cache_read_tokens), 0) as total_tokens,
                     COALESCE(SUM(CAST(l.total_cost_usd AS REAL)), 0) as total_cost,
                     COALESCE(SUM(CASE WHEN l.status_code >= 200 AND l.status_code < 300 THEN 1 ELSE 0 END), 0) as success_count,
-                    0 as cost_is_approximate,
+                    COALESCE(MAX(CASE
+                        WHEN l.app_type = 'cindy'
+                         AND l.model LIKE '%#billing=subscription'
+                         AND CAST(l.total_cost_usd AS REAL) > 0
+                        THEN 1 ELSE 0 END), 0) as cost_is_approximate,
                     COALESCE(SUM(l.latency_ms), 0) as latency_sum
                 FROM proxy_request_logs l
                 LEFT JOIN providers p ON l.provider_id = p.id AND l.app_type = p.app_type

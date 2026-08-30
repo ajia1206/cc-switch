@@ -43,8 +43,8 @@ const CINDY_APP_TYPE: &str = "cindy";
 const CINDY_LEGACY_DATA_SOURCE: &str = "cindy_daily";
 const CINDY_DETAIL_DATA_SOURCE: &str = "cindy_turn";
 const CINDY_PROVIDER_ID: &str = "_cindy_session";
-const CINDY_SYNC_VERSION: &str = "v6";
-const CINDY_SOURCE_SET_SYNC_KEY: &str = "desktop:cindy:v6:source-set";
+const CINDY_SYNC_VERSION: &str = "v7";
+const CINDY_SOURCE_SET_SYNC_KEY: &str = "desktop:cindy:v7:source-set";
 const CINDY_DETAIL_RETAIN_DAYS: i64 = 30;
 
 #[derive(Debug)]
@@ -188,6 +188,7 @@ struct CindyTurnUsage {
     agent_kind: String,
     canonical_model: String,
     billing_hint: Option<CindyBillingKind>,
+    cost_usd: Option<f64>,
     session_id: String,
     sdk_session_id: Option<String>,
     retained: bool,
@@ -480,6 +481,99 @@ fn assign_cindy_turn_models(
     }
 
     (assignments.len() == turns.len()).then_some(assignments)
+}
+
+fn allocate_cindy_turn_costs(
+    daily: &CindyDailyAggregate,
+    turns: &[&CindyTurnUsage],
+    model_assignments: &HashMap<String, String>,
+) -> HashMap<String, f64> {
+    let mut turns_by_model: HashMap<&str, Vec<&CindyTurnUsage>> = HashMap::new();
+    for turn in turns {
+        if let Some(model) = model_assignments.get(&turn.request_id) {
+            turns_by_model.entry(model.as_str()).or_default().push(turn);
+        }
+    }
+
+    let mut costs = HashMap::new();
+    for (model, model_turns) in turns_by_model {
+        let Some(source) = daily.source_models.get(model) else {
+            continue;
+        };
+        let source_cost = source.total_cost_usd.max(0.0);
+        if source_cost == 0.0 {
+            for turn in model_turns {
+                costs.insert(turn.request_id.clone(), 0.0);
+            }
+            continue;
+        }
+
+        let mut known_cost = 0.0;
+        let mut known_tokens = CindyTokenBuckets::default();
+        for turn in &model_turns {
+            if let Some(cost) = turn.cost_usd {
+                known_cost += cost;
+                known_tokens.add_assign(CindyTokenBuckets::from_turn(turn));
+            }
+        }
+        let known_cost_is_safe = known_cost.is_finite()
+            && known_cost <= source_cost + 1e-9
+            && known_tokens.fits_within(source.tokens);
+        if !known_cost_is_safe {
+            known_cost = 0.0;
+            known_tokens = CindyTokenBuckets::default();
+        }
+
+        let remaining_source_tokens = source.tokens.subtract(known_tokens).total().max(0) as f64;
+        let remaining_cost = (source_cost - known_cost).max(0.0);
+        for turn in model_turns {
+            let cost = if known_cost_is_safe {
+                turn.cost_usd.unwrap_or_else(|| {
+                    if remaining_source_tokens > 0.0 {
+                        remaining_cost * CindyTokenBuckets::from_turn(turn).total().max(0) as f64
+                            / remaining_source_tokens
+                    } else {
+                        0.0
+                    }
+                })
+            } else {
+                let source_tokens = source.tokens.total().max(0) as f64;
+                if source_tokens > 0.0 {
+                    source_cost * CindyTokenBuckets::from_turn(turn).total().max(0) as f64
+                        / source_tokens
+                } else {
+                    0.0
+                }
+            };
+            costs.insert(turn.request_id.clone(), cost.max(0.0));
+        }
+    }
+    costs
+}
+
+fn allocate_cindy_request_costs(turn_cost: f64, requests: &[&CodexSessionUsageEvent]) -> Vec<f64> {
+    let total_tokens = requests
+        .iter()
+        .map(|request| cindy_codex_event_tokens(request).total().max(0))
+        .sum::<i64>() as f64;
+    if turn_cost <= 0.0 || total_tokens <= 0.0 {
+        return vec![0.0; requests.len()];
+    }
+
+    let mut allocated = 0.0;
+    requests
+        .iter()
+        .enumerate()
+        .map(|(index, request)| {
+            let cost = if index + 1 == requests.len() {
+                (turn_cost - allocated).max(0.0)
+            } else {
+                turn_cost * cindy_codex_event_tokens(request).total().max(0) as f64 / total_tokens
+            };
+            allocated += cost;
+            cost
+        })
+        .collect()
 }
 
 fn empty_result(files_scanned: u32) -> SessionSyncResult {
@@ -877,10 +971,10 @@ fn insert_desktop_usage_outcome_on_conn(
                 record,
                 CINDY_MIRROR_REQUEST_MODEL,
                 CINDY_MIRROR_DATA_SOURCE,
-                // The mirror exists only for Cindy attribution. Its own
-                // authoritative daily cost is inserted separately, while the
-                // upstream row remains the sole cost contributor to All.
-                Some(0.0),
+                // Cindy attribution keeps Cindy's own allocated cost. The
+                // global queries exclude mirror rows, so the upstream request
+                // remains the sole contributor to All.
+                Some(record.total_cost_usd.unwrap_or(0.0)),
             )?;
         return Ok(DesktopUsageInsertOutcome::AccountedInUpstreamApp {
             total_cost_usd,
@@ -1344,6 +1438,7 @@ fn read_cindy_turn_usage_from_conn(
             continue;
         }
         let billing_hint = cindy_turn_billing_hint(&meta);
+        let cost_usd = finite_non_negative(meta.turn_cost_usd);
         let Some(details) = meta.turn_usage_details else {
             continue;
         };
@@ -1381,6 +1476,7 @@ fn read_cindy_turn_usage_from_conn(
             agent_kind,
             canonical_model,
             billing_hint,
+            cost_usd,
             session_id: format!("cindy:{account_hash}:{session_id}"),
             sdk_session_id,
             retained: created_at_ms >= cutoff_ms,
@@ -1645,11 +1741,15 @@ fn replace_cindy_usage(
     }
 
     let mut accepted_turn_models = HashMap::new();
+    let mut accepted_turn_costs = HashMap::new();
     for (key, turns) in &turns_by_key {
         if let Some(assignments) = daily_by_key
             .get(key)
             .and_then(|daily| assign_cindy_turn_models(daily, turns))
         {
+            if let Some(daily) = daily_by_key.get(key) {
+                accepted_turn_costs.extend(allocate_cindy_turn_costs(daily, turns, &assignments));
+            }
             accepted_turn_models.extend(assignments);
         } else {
             log::warn!(
@@ -1666,16 +1766,20 @@ fn replace_cindy_usage(
     let mut imported = 0u32;
     let mut accounted_turn_totals: HashMap<(CindyUsageKey, String), CindyTokenBuckets> =
         HashMap::new();
-    let mut upstream_turn_tokens: HashMap<(CindyUsageKey, String), CindyTokenBuckets> =
-        HashMap::new();
+    let mut accounted_turn_costs: HashMap<(CindyUsageKey, String), f64> = HashMap::new();
     for (key, turns) in &turns_by_key {
         for usage in turns {
             let Some(model) = accepted_turn_models.get(&usage.request_id).cloned() else {
                 continue;
             };
             let model_key = (key.clone(), model.clone());
+            let turn_cost = accepted_turn_costs
+                .get(&usage.request_id)
+                .copied()
+                .unwrap_or(0.0);
             if let Some(requests) = codex_requests_by_turn.get(&usage.request_id) {
-                for request in requests {
+                let request_costs = allocate_cindy_request_costs(turn_cost, requests);
+                for (request, request_cost) in requests.iter().zip(request_costs) {
                     let tokens = cindy_codex_event_tokens(request);
                     let record = DesktopUsageRecord {
                         request_id: format!(
@@ -1695,7 +1799,7 @@ fn replace_cindy_usage(
                         output_tokens: tokens.output as u32,
                         cache_read_tokens: tokens.cache_read as u32,
                         cache_creation_tokens: 0,
-                        total_cost_usd: Some(0.0),
+                        total_cost_usd: Some(request_cost),
                         latency_ms: 0,
                         duration_ms: None,
                         first_token_ms: None,
@@ -1711,34 +1815,22 @@ fn replace_cindy_usage(
                     match insert_desktop_usage_outcome_on_conn(&transaction, &record)? {
                         DesktopUsageInsertOutcome::Inserted => {
                             imported = imported.saturating_add(1);
-                            accounted_turn_totals
-                                .entry(model_key.clone())
-                                .or_default()
-                                .add_assign(tokens);
                         }
-                        DesktopUsageInsertOutcome::AccountedInSameApp => {
-                            accounted_turn_totals
-                                .entry(model_key.clone())
-                                .or_default()
-                                .add_assign(tokens);
-                        }
+                        DesktopUsageInsertOutcome::AccountedInSameApp => {}
                         DesktopUsageInsertOutcome::AccountedInUpstreamApp {
                             total_cost_usd: _,
                             mirror_inserted,
                         } => {
-                            accounted_turn_totals
-                                .entry(model_key.clone())
-                                .or_default()
-                                .add_assign(tokens);
-                            upstream_turn_tokens
-                                .entry(model_key.clone())
-                                .or_default()
-                                .add_assign(tokens);
                             if mirror_inserted {
                                 imported = imported.saturating_add(1);
                             }
                         }
                     }
+                    accounted_turn_totals
+                        .entry(model_key.clone())
+                        .or_default()
+                        .add_assign(tokens);
+                    *accounted_turn_costs.entry(model_key.clone()).or_default() += request_cost;
                 }
                 continue;
             }
@@ -1770,10 +1862,7 @@ fn replace_cindy_usage(
                 output_tokens: usage.output_tokens as u32,
                 cache_read_tokens: usage.cache_read_tokens as u32,
                 cache_creation_tokens: usage.cache_create_tokens as u32,
-                // Keep Cindy's authoritative cost on the daily row. Turn-level
-                // cost is optional/estimated for several agents and mixing the
-                // two sources would make the daily total drift.
-                total_cost_usd: Some(0.0),
+                total_cost_usd: Some(turn_cost),
                 // Cindy exposes whole-turn wall-clock duration, not provider
                 // request latency. Preserve it separately and keep latency unknown.
                 latency_ms: 0,
@@ -1787,40 +1876,22 @@ fn replace_cindy_usage(
             match insert_desktop_usage_outcome_on_conn(&transaction, &record)? {
                 DesktopUsageInsertOutcome::Inserted => {
                     imported = imported.saturating_add(1);
-                    accounted_turn_totals
-                        .entry(model_key)
-                        .or_default()
-                        .add_assign(CindyTokenBuckets::from_turn(usage));
                 }
-                DesktopUsageInsertOutcome::AccountedInSameApp => {
-                    // A Cindy proxy/detail row already carries this usage, so
-                    // subtract it from the daily residual without adding a
-                    // second Cindy row.
-                    accounted_turn_totals
-                        .entry(model_key)
-                        .or_default()
-                        .add_assign(CindyTokenBuckets::from_turn(usage));
-                }
+                DesktopUsageInsertOutcome::AccountedInSameApp => {}
                 DesktopUsageInsertOutcome::AccountedInUpstreamApp {
                     total_cost_usd: _,
                     mirror_inserted,
                 } => {
-                    // The native Codex/Pi row already contributes this turn to
-                    // All usage. Count it as accounted so Cindy's residual does
-                    // not reintroduce a cross-app duplicate.
-                    accounted_turn_totals
-                        .entry(model_key.clone())
-                        .or_default()
-                        .add_assign(CindyTokenBuckets::from_turn(usage));
-                    upstream_turn_tokens
-                        .entry(model_key)
-                        .or_default()
-                        .add_assign(CindyTokenBuckets::from_turn(usage));
                     if mirror_inserted {
                         imported = imported.saturating_add(1);
                     }
                 }
             }
+            accounted_turn_totals
+                .entry(model_key.clone())
+                .or_default()
+                .add_assign(CindyTokenBuckets::from_turn(usage));
+            *accounted_turn_costs.entry(model_key).or_default() += turn_cost;
         }
     }
 
@@ -1847,23 +1918,8 @@ fn replace_cindy_usage(
                 )));
             }
             let residual = source_model.tokens.subtract(covered);
-            let duplicated = upstream_turn_tokens
-                .get(&model_key)
-                .copied()
-                .unwrap_or_default();
-            let source_token_count = source_model.tokens.total().max(0) as f64;
-            let duplicated_token_count =
-                duplicated.total().clamp(0, source_model.tokens.total()) as f64;
-            // Cindy has no provider-request cost split. For a partially
-            // duplicated day/model bucket, apportion its authoritative cost
-            // by covered token share: Cindy remains exact, and All retains the
-            // non-duplicated Cindy share without double-counting the mirror.
-            let duplicated_cost = if source_token_count > 0.0 {
-                source_model.total_cost_usd * duplicated_token_count / source_token_count
-            } else {
-                0.0
-            };
-            let residual_cost = (source_model.total_cost_usd - duplicated_cost).max(0.0);
+            let covered_cost = accounted_turn_costs.get(&model_key).copied().unwrap_or(0.0);
+            let residual_cost = (source_model.total_cost_usd - covered_cost).max(0.0);
             if !residual.is_zero() || residual_cost > 0.0 {
                 insert_cindy_daily_rollup(
                     &transaction,
@@ -1872,17 +1928,6 @@ fn replace_cindy_usage(
                     model,
                     residual,
                     residual_cost,
-                )?;
-                imported = imported.saturating_add(1);
-            }
-            if duplicated_cost > 0.0 {
-                insert_cindy_daily_rollup(
-                    &transaction,
-                    key,
-                    model,
-                    CINDY_MIRROR_REQUEST_MODEL,
-                    CindyTokenBuckets::default(),
-                    duplicated_cost,
                 )?;
                 imported = imported.saturating_add(1);
             }
@@ -2968,13 +3013,13 @@ mod tests {
         source
             .execute(
                 "INSERT INTO daily_model_usage VALUES (
-                    ?1, 'codex', 'gpt-test#billing=api', 0, 0, 'USD', 0,
+                    ?1, 'codex', 'gpt-test#billing=subscription', 0, 0.8, 'USD', 1,
                     40, 20, 120, 0, ?2
                  )",
                 rusqlite::params![day, now.timestamp_millis()],
             )
             .unwrap();
-        insert_cindy_turn(
+        insert_cindy_turn_with_cost(
             &source,
             "message-1",
             "session-1",
@@ -2985,6 +3030,7 @@ mod tests {
             20,
             120,
             0,
+            Some(0.8),
         );
         let thread_id = "00000000-0000-4000-8000-000000000111";
         source
@@ -3022,6 +3068,42 @@ mod tests {
             )
             .unwrap();
         assert_eq!(detail, (2, 40, 20, 120, 0, INPUT_TOKEN_SEMANTICS_FRESH));
+        let detail_cost: f64 = conn
+            .query_row(
+                "SELECT SUM(CAST(total_cost_usd AS REAL))
+                 FROM proxy_request_logs
+                 WHERE app_type = 'cindy' AND data_source = 'cindy_turn'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!((detail_cost - 0.8).abs() < 1e-9);
+        let rollup_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM usage_daily_rollups WHERE app_type = 'cindy'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rollup_count, 0);
+        drop(conn);
+
+        let trends = db
+            .get_daily_trends(
+                Some(now.timestamp() - 60 * 60),
+                Some(now.timestamp() + 3),
+                Some("cindy"),
+                None,
+                None,
+            )
+            .unwrap();
+        assert!(trends.iter().all(|item| item.granularity == "hour"));
+        assert_eq!(trends.iter().map(|item| item.request_count).sum::<u64>(), 2);
+        let hourly_cost = trends
+            .iter()
+            .map(|item| item.total_cost.parse::<f64>().unwrap())
+            .sum::<f64>();
+        assert!((hourly_cost - 0.8).abs() < 1e-6);
     }
 
     #[test]
@@ -3032,6 +3114,7 @@ mod tests {
             agent_kind: "codex".to_string(),
             canonical_model: "gpt-test".to_string(),
             billing_hint: None,
+            cost_usd: None,
             session_id: "cindy:account:session".to_string(),
             sdk_session_id: Some("root-session".to_string()),
             retained,
@@ -3505,7 +3588,7 @@ mod tests {
         let reconciled =
             sync_cindy_usage_from_paths_with_force(&db, std::slice::from_ref(&source_path), true)
                 .unwrap();
-        assert_eq!(reconciled.imported, 2);
+        assert_eq!(reconciled.imported, 1);
         assert!(reconciled.data_changed);
         let conn = db.conn.lock().unwrap();
         let cindy_rows: i64 = conn
@@ -3517,7 +3600,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(cindy_rows, 2);
+        assert_eq!(cindy_rows, 1);
         drop(conn);
         let cindy_usage = db
             .get_usage_summary(None, None, Some("cindy"), None, None)
@@ -3656,7 +3739,7 @@ mod tests {
 
         let db = Database::memory().unwrap();
         let result = sync_cindy_usage_from_paths(&db, &[source_path]).unwrap();
-        assert_eq!(result.imported, 4);
+        assert_eq!(result.imported, 2);
         {
             let conn = db.conn.lock().unwrap();
             let mut statement = conn
@@ -3753,7 +3836,7 @@ mod tests {
         }
 
         let result = sync_cindy_usage_from_paths(&db, std::slice::from_ref(&source_path)).unwrap();
-        assert_eq!(result.imported, 2);
+        assert_eq!(result.imported, 1);
         {
             let conn = db.conn.lock().unwrap();
             let mirror: (String, String, String) = conn
@@ -3767,7 +3850,7 @@ mod tests {
                 .unwrap();
             assert_eq!(mirror.0, CINDY_MIRROR_DATA_SOURCE);
             assert_eq!(mirror.1, CINDY_MIRROR_REQUEST_MODEL);
-            assert_eq!(mirror.2, "0");
+            assert_eq!(mirror.2, "6");
         }
 
         let cindy = db
@@ -3983,7 +4066,7 @@ mod tests {
     }
 
     #[test]
-    fn cindy_v6_sync_rebuilds_when_only_v5_markers_exist() {
+    fn cindy_v7_sync_rebuilds_when_only_v6_markers_exist() {
         let dir = tempdir().unwrap();
         let source_path = dir.path().join("cindy-user-a.db");
         let source = Connection::open(&source_path).unwrap();
@@ -4002,11 +4085,11 @@ mod tests {
         let db = Database::memory().unwrap();
         let modified = source_modified_nanos(&source_path).unwrap();
         let path = source_path.to_string_lossy();
-        let v5_key = format!("desktop:cindy:v5:{}", cindy_short_hash(&[path.as_ref()]));
-        update_sync_state(&db, &v5_key, modified, 0).unwrap();
+        let v6_key = format!("desktop:cindy:v6:{}", cindy_short_hash(&[path.as_ref()]));
+        update_sync_state(&db, &v6_key, modified, 0).unwrap();
         update_sync_state(
             &db,
-            "desktop:cindy:v5:source-set",
+            "desktop:cindy:v6:source-set",
             cindy_source_set_marker(std::slice::from_ref(&source_path)),
             0,
         )

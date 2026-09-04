@@ -9,7 +9,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use crate::codex_config::{get_codex_auth_path, get_codex_config_dir};
-use crate::config::{atomic_write, get_app_config_dir, read_json_file, write_json_file};
+use crate::config::{
+    atomic_write, get_app_config_dir, get_home_dir, read_json_file, write_json_file,
+};
 use crate::error::AppError;
 use crate::services::subscription::{query_codex_quota, SubscriptionQuota};
 
@@ -108,6 +110,8 @@ struct JwtAuthPayload {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct JwtAuthNamespace {
+    #[serde(default)]
+    chatgpt_account_id: Option<String>,
     #[serde(default)]
     chatgpt_user_id: Option<String>,
     #[serde(default)]
@@ -517,6 +521,11 @@ fn read_registry_with_snapshot_scan() -> Result<Registry, AppError> {
     }
 
     registry.items.extend(discovered);
+    if let Some(live_key) =
+        live_account_key().filter(|key| registry.items.iter().any(|item| item.account_key == *key))
+    {
+        registry.active_account_key = Some(live_key);
+    }
     Ok(registry)
 }
 
@@ -710,17 +719,30 @@ fn copy_file_atomic(source: &Path, destination: &Path) -> Result<(), AppError> {
 
 fn account_paths() -> AccountPaths {
     let canonical_base = get_codex_config_dir().join("accounts");
-    let legacy_base = get_app_config_dir().join("codex-accounts");
-    let base = if canonical_base.exists() || !legacy_base.exists() {
-        canonical_base
-    } else {
-        legacy_base
-    };
+    let legacy_codex_base = get_home_dir().join(".codex").join("accounts");
+    let legacy_app_base = get_app_config_dir().join("codex-accounts");
+    let base = select_account_base(canonical_base, legacy_codex_base, legacy_app_base);
     AccountPaths {
         registry_path: base.join("registry.json"),
         snapshots_dir: base.join("snapshots"),
         backups_dir: base.join("backups"),
         latest_switch_path: base.join("latest-switch.json"),
+    }
+}
+
+fn select_account_base(
+    canonical_base: PathBuf,
+    legacy_codex_base: PathBuf,
+    legacy_app_base: PathBuf,
+) -> PathBuf {
+    if canonical_base.exists() {
+        canonical_base
+    } else if legacy_codex_base.exists() {
+        legacy_codex_base
+    } else if legacy_app_base.exists() {
+        legacy_app_base
+    } else {
+        canonical_base
     }
 }
 
@@ -735,11 +757,14 @@ fn account_key_from_auth(auth: &AuthSnapshot) -> String {
     }
 
     let tokens = auth.tokens.as_ref();
-    let payload = tokens
-        .and_then(|tokens| tokens.get("id_token"))
-        .and_then(Value::as_str)
-        .and_then(decode_id_token);
-    let auth_namespace = payload.as_ref().and_then(|payload| payload.auth.as_ref());
+    let id_payload = token_payload(tokens, "id_token");
+    let access_payload = token_payload(tokens, "access_token");
+    let auth_namespace = id_payload
+        .as_ref()
+        .and_then(|payload| payload.auth.as_ref());
+    let access_auth_namespace = access_payload
+        .as_ref()
+        .and_then(|payload| payload.auth.as_ref());
     let default_org = auth_namespace.and_then(|namespace| {
         namespace
             .organizations
@@ -750,9 +775,16 @@ fn account_key_from_auth(auth: &AuthSnapshot) -> String {
     let account_id = auth_namespace
         .and_then(|namespace| namespace.chatgpt_user_id.as_deref())
         .or_else(|| {
+            access_auth_namespace.and_then(|namespace| namespace.chatgpt_user_id.as_deref())
+        })
+        .or_else(|| {
             tokens
                 .and_then(|tokens| tokens.get("account_id"))
                 .and_then(Value::as_str)
+        })
+        .or_else(|| auth_namespace.and_then(|namespace| namespace.chatgpt_account_id.as_deref()))
+        .or_else(|| {
+            access_auth_namespace.and_then(|namespace| namespace.chatgpt_account_id.as_deref())
         })
         .unwrap_or("current");
     let workspace_id = tokens
@@ -763,10 +795,40 @@ fn account_key_from_auth(auth: &AuthSnapshot) -> String {
                 .and_then(|tokens| tokens.get("account_id"))
                 .and_then(Value::as_str)
         })
+        .or_else(|| auth_namespace.and_then(|namespace| namespace.chatgpt_account_id.as_deref()))
+        .or_else(|| {
+            access_auth_namespace.and_then(|namespace| namespace.chatgpt_account_id.as_deref())
+        })
         .or_else(|| default_org.and_then(|organization| organization.id.as_deref()))
         .unwrap_or("workspace");
 
     format!("{account_id}::{workspace_id}")
+}
+
+fn token_payload(tokens: Option<&Value>, field: &str) -> Option<JwtAuthPayload> {
+    tokens
+        .and_then(|tokens| tokens.get(field))
+        .and_then(Value::as_str)
+        .and_then(decode_id_token)
+}
+
+fn chatgpt_account_id_from_auth(auth: &AuthSnapshot) -> Option<String> {
+    let tokens = auth.tokens.as_ref();
+    tokens
+        .and_then(|tokens| tokens.get("account_id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            ["id_token", "access_token"].into_iter().find_map(|field| {
+                token_payload(tokens, field)
+                    .and_then(|payload| payload.auth)
+                    .and_then(|namespace| namespace.chatgpt_account_id)
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+            })
+        })
 }
 
 fn metadata_from_auth(auth: &AuthSnapshot) -> AccountMetadata {
@@ -906,7 +968,7 @@ pub async fn get_account_quota(account_key: &str) -> Result<SubscriptionQuota, A
         });
     }
 
-    let tokens = auth.tokens.ok_or_else(|| {
+    let tokens = auth.tokens.as_ref().ok_or_else(|| {
         AppError::Config(format!(
             "Missing tokens in snapshot for account {account_key}"
         ))
@@ -921,11 +983,11 @@ pub async fn get_account_quota(account_key: &str) -> Result<SubscriptionQuota, A
             ))
         })?;
 
-    let account_id = tokens.get("account_id").and_then(|v| v.as_str());
+    let account_id = chatgpt_account_id_from_auth(&auth);
 
     query_codex_quota(
         access_token,
-        account_id,
+        account_id.as_deref(),
         "codex",
         "Authentication failed. Please re-login with Codex CLI.",
     )
@@ -1274,6 +1336,27 @@ mod tests {
     use serial_test::serial;
     use tempfile::TempDir;
 
+    #[test]
+    fn account_base_preserves_legacy_codex_accounts_after_codex_home_moves() {
+        let temp = TempDir::new().expect("tempdir");
+        let canonical = temp.path().join("CindyGlobal/codex-home/accounts");
+        let legacy_codex = temp.path().join(".codex/accounts");
+        let legacy_app = temp.path().join(".cc-switch/codex-accounts");
+        fs::create_dir_all(&legacy_codex).expect("legacy Codex accounts");
+        fs::create_dir_all(&legacy_app).expect("legacy app accounts");
+
+        assert_eq!(
+            select_account_base(canonical.clone(), legacy_codex.clone(), legacy_app.clone()),
+            legacy_codex
+        );
+
+        fs::create_dir_all(&canonical).expect("canonical accounts");
+        assert_eq!(
+            select_account_base(canonical.clone(), legacy_codex, legacy_app),
+            canonical
+        );
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn mac_app_selection_prefers_chatgpt_and_keeps_legacy_fallback() {
@@ -1361,6 +1444,42 @@ mod tests {
         assert_eq!(metadata.email, "person@example.com");
         assert_eq!(metadata.name, "Person");
         assert_eq!(metadata.plan, "plus");
+    }
+
+    #[test]
+    fn chatgpt_account_key_supports_new_jwt_account_claims() {
+        let id_payload = URL_SAFE_NO_PAD.encode(
+            serde_json::to_vec(&json!({
+                "https://api.openai.com/auth": {
+                    "chatgpt_user_id": "user-new",
+                    "chatgpt_plan_type": "plus"
+                }
+            }))
+            .unwrap(),
+        );
+        let access_payload = URL_SAFE_NO_PAD.encode(
+            serde_json::to_vec(&json!({
+                "https://api.openai.com/auth": {
+                    "chatgpt_account_id": "workspace-new",
+                    "chatgpt_user_id": "user-new"
+                }
+            }))
+            .unwrap(),
+        );
+        let auth = AuthSnapshot {
+            auth_mode: Some("chatgpt".to_string()),
+            tokens: Some(json!({
+                "id_token": format!("header.{id_payload}.sig"),
+                "access_token": format!("header.{access_payload}.sig")
+            })),
+            openai_api_key: None,
+        };
+
+        assert_eq!(account_key_from_auth(&auth), "user-new::workspace-new");
+        assert_eq!(
+            chatgpt_account_id_from_auth(&auth).as_deref(),
+            Some("workspace-new")
+        );
     }
 
     #[test]
@@ -1478,7 +1597,9 @@ mod tests {
         let registry = Registry {
             schema_version: 2,
             updated_at: now_seconds(),
-            active_account_key: Some(chatgpt_key.clone()),
+            // Simulate a registry left behind by an older CC Switch run while
+            // the desktop Codex home is already logged in to ChatGPT.
+            active_account_key: Some(api_key.clone()),
             items: vec![
                 RegistryItem {
                     account_key: chatgpt_key.clone(),
@@ -1523,6 +1644,10 @@ mod tests {
         }));
 
         let to_api = switch_account(api_key.clone())?;
+        assert_eq!(
+            to_api.previous_account_key.as_deref(),
+            Some(chatgpt_key.as_str())
+        );
         assert_eq!(to_api.active_account_key, api_key);
         let live_api: AuthSnapshot = read_json_file(&auth_path)?;
         assert_eq!(live_api.auth_mode.as_deref(), Some("apikey"));

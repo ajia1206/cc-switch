@@ -154,15 +154,24 @@ fn load_thread_titles_from_db(db_path: &Path) -> HashMap<String, String> {
         return HashMap::new();
     }
 
-    // Mirror Codex's own `distinct_thread_metadata_title`: keep a title only
-    // when it differs from the first user message. Push the comparison into SQL
-    // (NULL-safe) so we never SELECT the unbounded `first_user_message` blob —
-    // it can grow large enough to OOM (openai/codex#29007).
-    let mut stmt = match conn.prepare(
-        "SELECT id, title FROM threads \
-         WHERE title <> '' \
-         AND (first_user_message IS NULL OR TRIM(title) <> TRIM(first_user_message))",
-    ) {
+    let columns = match thread_columns(&conn) {
+        Ok(columns) => columns,
+        Err(err) => {
+            log::warn!(
+                "Failed to inspect Codex thread schema for {}: {err}",
+                db_path.display()
+            );
+            return HashMap::new();
+        }
+    };
+    let Some(title_expression) = thread_title_expression(&columns) else {
+        return HashMap::new();
+    };
+    let query = format!(
+        "SELECT id, {title_expression} AS display_title FROM threads \
+         WHERE {title_expression} IS NOT NULL"
+    );
+    let mut stmt = match conn.prepare(&query) {
         Ok(stmt) => stmt,
         Err(err) => {
             log::warn!(
@@ -199,6 +208,43 @@ fn load_thread_titles_from_db(db_path: &Path) -> HashMap<String, String> {
             }
         })
         .collect()
+}
+
+fn thread_columns(conn: &Connection) -> rusqlite::Result<std::collections::HashSet<String>> {
+    let mut stmt = conn.prepare("PRAGMA table_info(threads)")?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    Ok(rows.flatten().collect())
+}
+
+fn thread_title_expression(columns: &std::collections::HashSet<String>) -> Option<String> {
+    if !columns.contains("id") {
+        return None;
+    }
+
+    let first_message = columns.contains("first_user_message");
+    let mut candidates = Vec::new();
+    if columns.contains("name") {
+        candidates.push("NULLIF(TRIM(name), '')".to_string());
+    }
+    for column in ["title", "preview"] {
+        if !columns.contains(column) {
+            continue;
+        }
+        if first_message {
+            candidates.push(format!(
+                "CASE WHEN first_user_message IS NULL OR TRIM({column}) <> TRIM(first_user_message) \
+                 THEN NULLIF(TRIM({column}), '') END"
+            ));
+        } else {
+            candidates.push(format!("NULLIF(TRIM({column}), '')"));
+        }
+    }
+
+    match candidates.len() {
+        0 => None,
+        1 => candidates.pop(),
+        _ => Some(format!("COALESCE({})", candidates.join(", "))),
+    }
 }
 
 pub fn load_messages(path: &Path) -> Result<Vec<SessionMessage>, String> {
@@ -695,6 +741,40 @@ mod tests {
         );
         // Filtered: title equals the first user message.
         assert!(!titles.contains_key("thread-2"));
+    }
+
+    #[test]
+    fn load_thread_titles_from_new_schema_prefers_name_without_first_message_column() {
+        let temp = tempdir().expect("tempdir");
+        let db_path = temp.path().join("state_6.sqlite");
+        let conn = Connection::open(&db_path).expect("open sqlite db");
+        conn.execute(
+            "CREATE TABLE threads (id TEXT PRIMARY KEY, name TEXT, preview TEXT NOT NULL)",
+            [],
+        )
+        .expect("create threads table");
+        conn.execute(
+            "INSERT INTO threads (id, name, preview) VALUES (?1, ?2, ?3)",
+            ("thread-1", "  Generated task name  ", "Original prompt"),
+        )
+        .expect("insert named thread");
+        conn.execute(
+            "INSERT INTO threads (id, name, preview) VALUES (?1, NULL, ?2)",
+            ("thread-2", "  Preview fallback  "),
+        )
+        .expect("insert preview thread");
+        drop(conn);
+
+        let titles = load_thread_titles_from_db(&db_path);
+
+        assert_eq!(
+            titles.get("thread-1").map(String::as_str),
+            Some("Generated task name")
+        );
+        assert_eq!(
+            titles.get("thread-2").map(String::as_str),
+            Some("Preview fallback")
+        );
     }
 
     #[test]

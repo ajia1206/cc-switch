@@ -9,6 +9,7 @@ import {
 } from "@/components/ui/table";
 import { useModelStats } from "@/lib/query/usage";
 import { fmtUsd } from "./format";
+import { UsageModelLabel } from "./UsageModelLabel";
 import type { UsageRangeSelection } from "@/types/usage";
 
 interface ModelStatsTableProps {
@@ -70,25 +71,27 @@ export function ModelStatsTable({
               </TableCell>
             </TableRow>
           ) : (
-            stats?.map((stat) => (
-              <TableRow key={stat.model}>
-                <TableCell className="font-mono text-sm">
-                  {stat.model}
-                </TableCell>
-                <TableCell className="text-right">
-                  {stat.requestCount.toLocaleString()}
-                </TableCell>
-                <TableCell className="text-right">
-                  {stat.totalTokens.toLocaleString()}
-                </TableCell>
-                <TableCell className="text-right">
-                  {fmtUsd(stat.totalCost, 4)}
-                </TableCell>
-                <TableCell className="text-right">
-                  {fmtUsd(stat.avgCostPerRequest, 6)}
-                </TableCell>
-              </TableRow>
-            ))
+            stats?.map((stat) => {
+              return (
+                <TableRow key={stat.model}>
+                  <TableCell className="font-mono text-sm">
+                    <UsageModelLabel model={stat.model} />
+                  </TableCell>
+                  <TableCell className="text-right">
+                    {stat.requestCount.toLocaleString()}
+                  </TableCell>
+                  <TableCell className="text-right">
+                    {stat.totalTokens.toLocaleString()}
+                  </TableCell>
+                  <TableCell className="text-right">
+                    {fmtUsd(stat.totalCost, 4)}
+                  </TableCell>
+                  <TableCell className="text-right">
+                    {fmtUsd(stat.avgCostPerRequest, 6)}
+                  </TableCell>
+                </TableRow>
+              );
+            })
           )}
         </TableBody>
       </Table>

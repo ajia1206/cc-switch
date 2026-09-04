@@ -1810,6 +1810,8 @@
     "totalCost": "総コスト",
     "cost": "コスト",
     "unpriced": "価格未設定",
+    "subscription": "サブスク",
+    "subscriptionIncluded": "サブスク内",
     "perMillion": "(100万あたり)",
     "trends": "利用トレンド",
     "dailyFallbackHint": "日次集計を含むため、時間精度は日単位です",

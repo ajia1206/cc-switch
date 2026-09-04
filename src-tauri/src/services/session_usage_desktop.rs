@@ -1962,12 +1962,12 @@ fn replace_cindy_usage(
             let residual = source_model.tokens.subtract(covered);
             let covered_cost = accounted_turn_costs.get(&model_key).copied().unwrap_or(0.0);
             let source_residual_cost = (source_model.total_cost_usd - covered_cost).max(0.0);
-            let residual_cost = if key.agent_kind == "codex" {
+            // Apply the official model pricing table consistently across all
+            // Cindy agent kinds. Subscription billing is only a source hint;
+            // when a model price exists it is the authoritative estimate.
+            let residual_cost =
                 cindy_model_priced_cost(&transaction, &key.canonical_model, residual)
-                    .unwrap_or(source_residual_cost)
-            } else {
-                source_residual_cost
-            };
+                    .unwrap_or(source_residual_cost);
             if !residual.is_zero() || residual_cost > 0.0 {
                 insert_cindy_daily_rollup(
                     &transaction,

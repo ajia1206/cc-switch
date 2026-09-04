@@ -1810,6 +1810,8 @@
     "totalCost": "总成本",
     "cost": "成本",
     "unpriced": "未定价",
+    "subscription": "订阅",
+    "subscriptionIncluded": "订阅内",
     "perMillion": "(每百万)",
     "trends": "使用趋势",
     "dailyFallbackHint": "包含日级汇总，时间精度为天",

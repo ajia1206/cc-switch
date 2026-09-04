@@ -18,12 +18,8 @@ import {
   Sparkles,
   Zap,
 } from "lucide-react";
-import {
-  fmtUsd,
-  formatTokensShort,
-  getResolvedLang,
-  parseFiniteNumber,
-} from "./format";
+import { fmtUsd, formatTokensShort, getResolvedLang } from "./format";
+import { parseStrictUsageCost } from "./UsageModelLabel";
 import {
   getCacheWriteAvailability,
   type AppType,
@@ -105,6 +101,7 @@ function aggregateSummaries(items: UsageSummary[]): UsageSummary {
   let totalRequests = 0;
   let successCount = 0;
   let totalCostNum = 0;
+  let hasValidCosts = true;
   let input = 0;
   let output = 0;
   let cacheCreation = 0;
@@ -113,7 +110,12 @@ function aggregateSummaries(items: UsageSummary[]): UsageSummary {
   for (const s of items) {
     totalRequests += s.totalRequests;
     successCount += Math.round((s.totalRequests * s.successRate) / 100);
-    totalCostNum += parseFiniteNumber(s.totalCost) ?? 0;
+    const cost = parseStrictUsageCost(s.totalCost);
+    if (cost == null) {
+      hasValidCosts = false;
+    } else {
+      totalCostNum += cost;
+    }
     input += s.totalInputTokens;
     output += s.totalOutputTokens;
     cacheCreation += s.totalCacheCreationTokens;
@@ -123,7 +125,7 @@ function aggregateSummaries(items: UsageSummary[]): UsageSummary {
   const cacheableInput = input + cacheCreation + cacheRead;
   return {
     totalRequests,
-    totalCost: totalCostNum.toFixed(6),
+    totalCost: hasValidCosts ? totalCostNum.toFixed(6) : "",
     totalInputTokens: input,
     totalOutputTokens: output,
     totalCacheCreationTokens: cacheCreation,
@@ -217,7 +219,7 @@ export function UsageHero({
   const cacheRead = summary?.totalCacheReadTokens ?? 0;
   const realTotal = summary?.realTotalTokens ?? 0;
   const hitRate = summary?.cacheHitRate ?? 0;
-  const totalCost = parseFiniteNumber(summary?.totalCost);
+  const totalCost = parseStrictUsageCost(summary?.totalCost);
   const requests = summary?.totalRequests ?? 0;
 
   const cacheWriteDisplay = {

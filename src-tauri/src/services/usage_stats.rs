@@ -685,49 +685,6 @@ fn push_rollup_date_filters(
     ));
 }
 
-fn has_cindy_rollup_for_range(
-    conn: &Connection,
-    start_ts: i64,
-    end_ts: i64,
-    app_type: Option<&str>,
-    provider_name: Option<&str>,
-    model: Option<&str>,
-) -> Result<bool, AppError> {
-    // The trend response combines token and cost series. A cost-only Cindy
-    // rollup must still switch the whole response to daily granularity;
-    // otherwise the hourly response would silently drop authoritative cost.
-    if app_type.is_some_and(|value| !value.eq_ignore_ascii_case("cindy")) {
-        return Ok(false);
-    }
-    let bounds = compute_rollup_date_bounds(Some(start_ts), Some(end_ts))?;
-    let mut conditions = vec!["r.app_type = 'cindy'".to_string()];
-    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-    conditions.push(rollup_date_clause(
-        &mut params,
-        "r.date",
-        &bounds.coarse_start,
-        &bounds.coarse_end,
-        bounds.coarse_is_empty,
-    ));
-    push_cindy_mirror_rollup_filter(&mut conditions, "r", app_type);
-    push_provider_model_filters(&mut conditions, &mut params, "r", "p", provider_name, model);
-    let provider_join = if provider_name.is_some() {
-        providers_join("r", "p")
-    } else {
-        String::new()
-    };
-    let sql = format!(
-        "SELECT EXISTS(
-            SELECT 1 FROM usage_daily_rollups r {provider_join}
-            WHERE {}
-        )",
-        conditions.join(" AND ")
-    );
-    let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|value| value.as_ref()).collect();
-    conn.query_row(&sql, param_refs.as_slice(), |row| row.get(0))
-        .map_err(|error| AppError::Database(format!("检查 Cindy 日补差失败: {error}")))
-}
-
 fn local_day_start_rfc3339(day: NaiveDate) -> String {
     let local_midnight = day
         .and_hms_opt(0, 0, 0)
@@ -1111,9 +1068,7 @@ impl Database {
         }
 
         let duration = end_ts - start_ts;
-        let has_cindy_fallback = duration <= 24 * 60 * 60
-            && has_cindy_rollup_for_range(&conn, start_ts, end_ts, app_type, provider_name, model)?;
-        if duration <= 24 * 60 * 60 && !has_cindy_fallback {
+        if duration <= 24 * 60 * 60 {
             let bucket_seconds: i64 = 60 * 60;
             let mut bucket_count: i64 = if duration <= 0 {
                 1
@@ -1208,6 +1163,110 @@ impl Database {
                     bucket_idx = bucket_count - 1;
                 }
                 map.insert(bucket_idx, stat);
+            }
+
+            // Cindy's daily source can contain residual tokens that are not
+            // represented by retained turn detail. Keep the short-window
+            // response hourly and attach those daily residuals to the first
+            // hour belonging to the local day. This is intentionally marked
+            // approximate because the source does not expose an hour.
+            if app_type.is_none_or(|value| value.eq_ignore_ascii_case("cindy")) {
+                let mut rollup_conditions = vec!["r.app_type = 'cindy'".to_string()];
+                let mut rollup_params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+                let bounds = compute_rollup_date_bounds(Some(start_ts), Some(end_ts))?;
+                rollup_conditions.push(rollup_date_clause(
+                    &mut rollup_params,
+                    "r.date",
+                    &bounds.coarse_start,
+                    &bounds.coarse_end,
+                    bounds.coarse_is_empty,
+                ));
+                push_cindy_mirror_rollup_filter(&mut rollup_conditions, "r", app_type);
+                push_provider_model_filters(
+                    &mut rollup_conditions,
+                    &mut rollup_params,
+                    "r",
+                    "p",
+                    provider_name,
+                    model,
+                );
+                let rollup_join = if provider_name.is_some() {
+                    providers_join("r", "p")
+                } else {
+                    String::new()
+                };
+                let rollup_fresh_input = fresh_input_sql("r");
+                let rollup_sql = format!(
+                    "SELECT r.date, COALESCE(SUM(r.request_count),0),
+                            COALESCE(SUM(CAST(r.total_cost_usd AS REAL)),0),
+                            COALESCE(SUM({rollup_fresh_input}),0),
+                            COALESCE(SUM(r.output_tokens),0),
+                            COALESCE(SUM(r.cache_creation_tokens),0),
+                            COALESCE(SUM(r.cache_read_tokens),0)
+                     FROM usage_daily_rollups r {rollup_join}
+                     WHERE {} GROUP BY r.date",
+                    rollup_conditions.join(" AND ")
+                );
+                let refs: Vec<&dyn rusqlite::ToSql> =
+                    rollup_params.iter().map(|p| p.as_ref()).collect();
+                let mut stmt = conn.prepare(&rollup_sql)?;
+                let rows = stmt.query_map(refs.as_slice(), |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)? as u64,
+                        row.get::<_, f64>(2)?,
+                        row.get::<_, i64>(3)? as u64,
+                        row.get::<_, i64>(4)? as u64,
+                        row.get::<_, i64>(5)? as u64,
+                        row.get::<_, i64>(6)? as u64,
+                    ))
+                })?;
+                for row in rows {
+                    let (day, req, cost, inp, out, cc, cr) = row?;
+                    let day = NaiveDate::parse_from_str(&day, "%Y-%m-%d").map_err(|err| {
+                        AppError::Database(format!("解析 Cindy 趋势日期失败: {err}"))
+                    })?;
+                    let target = (0..bucket_count)
+                        .find(|idx| {
+                            local_datetime_from_timestamp(start_ts + idx * bucket_seconds)
+                                .map(|dt| dt.date_naive() == day)
+                                .unwrap_or(false)
+                        })
+                        .unwrap_or_else(|| {
+                            if day
+                                < local_datetime_from_timestamp(start_ts)
+                                    .unwrap()
+                                    .date_naive()
+                            {
+                                0
+                            } else {
+                                bucket_count - 1
+                            }
+                        });
+                    let stat = map.entry(target).or_insert_with(|| DailyStats {
+                        date: String::new(),
+                        granularity: "hour".to_string(),
+                        is_approximate: true,
+                        request_count: 0,
+                        total_cost: "0.000000".to_string(),
+                        total_tokens: 0,
+                        total_input_tokens: 0,
+                        total_output_tokens: 0,
+                        total_cache_creation_tokens: 0,
+                        total_cache_read_tokens: 0,
+                    });
+                    stat.request_count += req;
+                    stat.total_cost = format!(
+                        "{:.6}",
+                        stat.total_cost.parse::<f64>().unwrap_or(0.0) + cost
+                    );
+                    stat.total_input_tokens += inp;
+                    stat.total_output_tokens += out;
+                    stat.total_cache_creation_tokens += cc;
+                    stat.total_cache_read_tokens += cr;
+                    stat.total_tokens += inp + out + cc + cr;
+                    stat.is_approximate = true;
+                }
             }
 
             let mut stats = Vec::with_capacity(bucket_count as usize);
@@ -4771,7 +4830,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get_daily_trends_uses_daily_granularity_for_cindy_residual() -> Result<(), AppError> {
+    fn test_get_daily_trends_keeps_hourly_granularity_for_cindy_residual() -> Result<(), AppError> {
         let db = Database::memory()?;
         let now = Local::now();
         let day_start = now
@@ -4814,14 +4873,23 @@ mod tests {
             None,
             None,
         )?;
-        assert_eq!(stats.len(), 1);
-        assert_eq!(stats[0].granularity, "day");
-        assert!(stats[0].is_approximate);
-        assert_eq!(stats[0].request_count, 1);
-        assert_eq!(stats[0].total_input_tokens, 100);
-        assert_eq!(stats[0].total_output_tokens, 20);
-        assert_eq!(stats[0].total_cache_read_tokens, 70);
-        assert_eq!(stats[0].total_cache_creation_tokens, 10);
+        assert!(stats.len() <= 24 && stats.len() >= 1);
+        assert!(stats.iter().all(|item| item.granularity == "hour"));
+        assert!(stats.iter().any(|item| item.is_approximate));
+        assert_eq!(stats.iter().map(|s| s.request_count).sum::<u64>(), 1);
+        assert_eq!(stats.iter().map(|s| s.total_input_tokens).sum::<u64>(), 100);
+        assert_eq!(stats.iter().map(|s| s.total_output_tokens).sum::<u64>(), 20);
+        assert_eq!(
+            stats.iter().map(|s| s.total_cache_read_tokens).sum::<u64>(),
+            70
+        );
+        assert_eq!(
+            stats
+                .iter()
+                .map(|s| s.total_cache_creation_tokens)
+                .sum::<u64>(),
+            10
+        );
 
         let filtered = db.get_daily_trends(
             Some(day_start),
@@ -4830,7 +4898,7 @@ mod tests {
             Some("Cindy · Pi"),
             Some("gpt-test"),
         )?;
-        assert_eq!(filtered[0].granularity, "day");
+        assert!(filtered.iter().all(|item| item.granularity == "hour"));
 
         let mismatched = db.get_daily_trends(
             Some(day_start),
@@ -4848,8 +4916,8 @@ mod tests {
             None,
             None,
         )?;
-        assert_eq!(all_apps[0].granularity, "day");
-        assert!(all_apps[0].is_approximate);
+        assert!(all_apps.iter().all(|item| item.granularity == "hour"));
+        assert!(all_apps.iter().any(|item| item.is_approximate));
 
         Ok(())
     }
@@ -4899,11 +4967,17 @@ mod tests {
             None,
             None,
         )?;
-        assert_eq!(stats.len(), 1);
-        assert_eq!(stats[0].granularity, "day");
-        assert!(stats[0].is_approximate);
-        assert_eq!(stats[0].total_input_tokens, 60);
-        assert_eq!(stats[0].total_cost, "0.250000");
+        assert!(stats.len() >= 1);
+        assert!(stats.iter().all(|item| item.granularity == "hour"));
+        assert!(stats.iter().any(|item| item.is_approximate));
+        assert_eq!(stats.iter().map(|s| s.total_input_tokens).sum::<u64>(), 60);
+        assert_eq!(
+            stats
+                .iter()
+                .map(|s| s.total_cost.parse::<f64>().unwrap())
+                .sum::<f64>(),
+            0.25
+        );
 
         Ok(())
     }

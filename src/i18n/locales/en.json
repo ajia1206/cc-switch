@@ -1810,6 +1810,8 @@
     "totalCost": "Total Cost",
     "cost": "Cost",
     "unpriced": "Unpriced",
+    "subscription": "Subscription",
+    "subscriptionIncluded": "Included",
     "perMillion": "(per million)",
     "trends": "Usage Trends",
     "dailyFallbackHint": "Includes daily-level totals; time precision is daily",

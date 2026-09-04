@@ -32,6 +32,11 @@ import {
   getLocaleFromLanguage,
   parseFiniteNumber,
 } from "./format";
+import {
+  parseUsageModel,
+  resolveEffectiveUsageModel,
+  UsageModelLabel,
+} from "./UsageModelLabel";
 
 interface RequestLogTableProps {
   range: UsageRangeSelection;
@@ -195,6 +200,11 @@ export function RequestLogTable({
                   </TableRow>
                 ) : (
                   logs.map((log) => {
+                    const effectivePricingModel = resolveEffectiveUsageModel(
+                      log.pricingModel,
+                      log.model,
+                      log.requestModel,
+                    );
                     const unpriced = isUnpricedUsage(log);
                     return (
                       <TableRow key={log.requestId}>
@@ -216,22 +226,23 @@ export function RequestLogTable({
                           <div
                             className="truncate"
                             title={
-                              log.requestModel && log.requestModel !== log.model
-                                ? `${log.requestModel} → ${log.model}`
-                                : log.model
+                              log.requestModel &&
+                              log.requestModel !== effectivePricingModel
+                                ? `${parseUsageModel(log.requestModel).label} → ${parseUsageModel(effectivePricingModel).label}`
+                                : parseUsageModel(effectivePricingModel).label
                             }
                           >
                             {log.requestModel &&
-                            log.requestModel !== log.model ? (
-                              <span>
-                                {log.requestModel}
-                                <span className="text-muted-foreground">
-                                  {" → "}
-                                  {log.model}
-                                </span>
+                            log.requestModel !== effectivePricingModel ? (
+                              <span className="inline-flex min-w-0 items-center gap-1">
+                                <UsageModelLabel model={log.requestModel} />
+                                <span className="text-muted-foreground">→</span>
+                                <UsageModelLabel
+                                  model={effectivePricingModel}
+                                />
                               </span>
                             ) : (
-                              log.model
+                              <UsageModelLabel model={effectivePricingModel} />
                             )}
                           </div>
                         </TableCell>

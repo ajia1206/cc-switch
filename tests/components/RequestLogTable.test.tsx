@@ -9,10 +9,13 @@ vi.mock("react-i18next", () => ({
   useTranslation: () => ({
     t: (
       key: string,
-      options?: {
-        defaultValue?: string;
-      },
-    ) => options?.defaultValue ?? key,
+      options?:
+        | string
+        | {
+            defaultValue?: string;
+          },
+    ) =>
+      typeof options === "string" ? options : (options?.defaultValue ?? key),
     i18n: {
       resolvedLanguage: "en",
       language: "en",
@@ -116,6 +119,56 @@ describe("RequestLogTable", () => {
         }),
       );
     });
+  });
+
+  it("renders the effective subscription pricing model with official-price accounting", () => {
+    useRequestLogsMock.mockReturnValue({
+      data: {
+        data: [
+          {
+            requestId: "request-1",
+            providerId: "provider-1",
+            providerName: "Cindy",
+            appType: "cindy",
+            model: "gpt-response",
+            requestModel: "gpt-request",
+            pricingModel: "chatgpt/gpt-5.6-sol#billing=subscription",
+            costMultiplier: "1",
+            inputTokens: 100,
+            outputTokens: 20,
+            cacheReadTokens: 0,
+            cacheCreationTokens: 0,
+            inputCostUsd: "0.000500",
+            outputCostUsd: "0.000600",
+            cacheReadCostUsd: "0.000000",
+            cacheCreationCostUsd: "0.000000",
+            totalCostUsd: "0.001100",
+            isStreaming: false,
+            latencyMs: 100,
+            statusCode: 200,
+            createdAt: 1_700_000_000,
+          },
+        ],
+        total: 1,
+        page: 0,
+        pageSize: 20,
+      },
+      isLoading: false,
+    });
+
+    render(
+      <RequestLogTable
+        range={{ preset: "today" }}
+        rangeLabel="Today"
+        appType="all"
+        refreshIntervalMs={0}
+      />,
+    );
+
+    expect(screen.getByText("GPT-5.6 Sol")).toBeInTheDocument();
+    expect(screen.getByText("订阅")).toBeInTheDocument();
+    expect(screen.getByText("$0.0011")).toBeInTheDocument();
+    expect(screen.queryByText("gpt-response")).not.toBeInTheDocument();
   });
 
   it("resets pagination when the dashboard app filter changes", async () => {

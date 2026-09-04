@@ -1811,6 +1811,8 @@
     "totalCost": "總成本",
     "cost": "成本",
     "unpriced": "未定價",
+    "subscription": "訂閱",
+    "subscriptionIncluded": "訂閱內",
     "perMillion": "(每百萬)",
     "trends": "使用趨勢",
     "dailyFallbackHint": "包含日級彙總，時間精度為天",

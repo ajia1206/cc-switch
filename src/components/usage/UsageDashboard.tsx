@@ -51,6 +51,7 @@ import { Switch } from "@/components/ui/switch";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { usageApi } from "@/lib/api/usage";
 import { toast } from "sonner";
+import { parseUsageModel, UsageModelLabel } from "./UsageModelLabel";
 
 const APP_FILTER_OPTIONS: AppTypeFilter[] = ["all", ...KNOWN_APP_TYPES];
 
@@ -357,7 +358,9 @@ export function UsageDashboard({
           >
             <SelectTrigger
               className="h-9 w-[100px] bg-background text-xs focus:border-border-default [&>span]:min-w-0 [&>span]:truncate"
-              title={model ?? t("usage.filterByModel")}
+              title={
+                model ? parseUsageModel(model).label : t("usage.filterByModel")
+              }
             >
               <SelectValue />
             </SelectTrigger>
@@ -367,10 +370,10 @@ export function UsageDashboard({
                 <SelectItem
                   key={name}
                   value={encodeOptionValue(name)}
-                  title={name}
+                  title={parseUsageModel(name).label}
                   className="[&>span]:min-w-0 [&>span]:truncate"
                 >
-                  {name}
+                  <UsageModelLabel model={name} />
                 </SelectItem>
               ))}
             </SelectContent>

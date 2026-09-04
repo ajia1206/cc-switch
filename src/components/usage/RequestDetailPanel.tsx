@@ -7,10 +7,16 @@ import {
 } from "@/components/ui/dialog";
 import { useRequestDetail } from "@/lib/query/usage";
 import { getFreshInputTokens, isUnpricedUsage } from "@/types/usage";
+import { parseStrictUsageCost, UsageModelLabel } from "./UsageModelLabel";
 
 interface RequestDetailPanelProps {
   requestId: string;
   onClose: () => void;
+}
+
+function formatStrictUsd(value: unknown, digits = 6): string {
+  const cost = parseStrictUsageCost(value);
+  return cost == null ? "--" : `$${cost.toFixed(digits)}`;
 }
 
 export function RequestDetailPanel({
@@ -55,7 +61,10 @@ export function RequestDetailPanel({
 
   const freshInput = getFreshInputTokens(request);
   const isCacheInclusive = request.inputTokens !== freshInput;
-  const unpriced = isUnpricedUsage(request);
+  const totalCost = parseStrictUsageCost(request.totalCostUsd);
+  const costMultiplier = parseStrictUsageCost(request.costMultiplier);
+  const hasCostMultiplier = costMultiplier != null && costMultiplier !== 1;
+  const unpriced = totalCost != null && isUnpricedUsage(request);
 
   return (
     <Dialog open onOpenChange={onClose}>
@@ -110,7 +119,9 @@ export function RequestDetailPanel({
                 <dt className="text-muted-foreground">
                   {t("usage.model", "模型")}
                 </dt>
-                <dd className="font-mono">{request.model}</dd>
+                <dd className="font-mono">
+                  <UsageModelLabel model={request.model} />
+                </dd>
                 {request.requestModel &&
                   request.requestModel !== request.model && (
                     <>
@@ -118,7 +129,7 @@ export function RequestDetailPanel({
                         {t("usage.requestModel", "请求模型")}
                       </dt>
                       <dd className="font-mono text-xs">
-                        {request.requestModel}
+                        <UsageModelLabel model={request.requestModel} />
                       </dd>
                     </>
                   )}
@@ -129,7 +140,7 @@ export function RequestDetailPanel({
                         {t("usage.pricingModel", "计价模型")}
                       </dt>
                       <dd className="font-mono text-xs">
-                        {request.pricingModel}
+                        <UsageModelLabel model={request.pricingModel} />
                       </dd>
                     </>
                   )}
@@ -202,7 +213,12 @@ export function RequestDetailPanel({
                   {t("usage.totalTokens", "总计")}
                 </dt>
                 <dd className="text-lg font-semibold">
-                  {(freshInput + request.outputTokens).toLocaleString()}
+                  {(
+                    freshInput +
+                    request.outputTokens +
+                    request.cacheReadTokens +
+                    request.cacheCreationTokens
+                  ).toLocaleString()}
                 </dd>
               </div>
             </dl>
@@ -222,7 +238,7 @@ export function RequestDetailPanel({
                   </span>
                 </dt>
                 <dd className="font-mono">
-                  ${parseFloat(request.inputCostUsd).toFixed(6)}
+                  {formatStrictUsd(request.inputCostUsd)}
                 </dd>
               </div>
               <div>
@@ -233,7 +249,7 @@ export function RequestDetailPanel({
                   </span>
                 </dt>
                 <dd className="font-mono">
-                  ${parseFloat(request.outputCostUsd).toFixed(6)}
+                  {formatStrictUsd(request.outputCostUsd)}
                 </dd>
               </div>
               <div>
@@ -244,7 +260,7 @@ export function RequestDetailPanel({
                   </span>
                 </dt>
                 <dd className="font-mono">
-                  ${parseFloat(request.cacheReadCostUsd).toFixed(6)}
+                  {formatStrictUsd(request.cacheReadCostUsd)}
                 </dd>
               </div>
               <div>
@@ -255,30 +271,28 @@ export function RequestDetailPanel({
                   </span>
                 </dt>
                 <dd className="font-mono">
-                  ${parseFloat(request.cacheCreationCostUsd).toFixed(6)}
+                  {formatStrictUsd(request.cacheCreationCostUsd)}
                 </dd>
               </div>
               {/* 显示成本倍率（如果不等于1） */}
-              {request.costMultiplier &&
-                parseFloat(request.costMultiplier) !== 1 && (
-                  <div className="col-span-2 border-t pt-3">
-                    <dt className="text-muted-foreground">
-                      {t("usage.costMultiplier", "成本倍率")}
-                    </dt>
-                    <dd className="font-mono">×{request.costMultiplier}</dd>
-                  </div>
-                )}
+              {hasCostMultiplier && (
+                <div className="col-span-2 border-t pt-3">
+                  <dt className="text-muted-foreground">
+                    {t("usage.costMultiplier", "成本倍率")}
+                  </dt>
+                  <dd className="font-mono">×{request.costMultiplier}</dd>
+                </div>
+              )}
               <div
-                className={`col-span-2 ${request.costMultiplier && parseFloat(request.costMultiplier) !== 1 ? "" : "border-t"} pt-3`}
+                className={`col-span-2 ${hasCostMultiplier ? "" : "border-t"} pt-3`}
               >
                 <dt className="text-muted-foreground">
                   {t("usage.totalCost", "总成本")}
-                  {request.costMultiplier &&
-                    parseFloat(request.costMultiplier) !== 1 && (
-                      <span className="ml-1 text-xs">
-                        ({t("usage.withMultiplier", "含倍率")})
-                      </span>
-                    )}
+                  {hasCostMultiplier && (
+                    <span className="ml-1 text-xs">
+                      ({t("usage.withMultiplier", "含倍率")})
+                    </span>
+                  )}
                 </dt>
                 <dd
                   className={`text-lg font-semibold ${
@@ -287,7 +301,7 @@ export function RequestDetailPanel({
                 >
                   {unpriced
                     ? t("usage.unpriced", "未定价")
-                    : `$${parseFloat(request.totalCostUsd).toFixed(6)}`}
+                    : formatStrictUsd(request.totalCostUsd)}
                 </dd>
               </div>
             </dl>

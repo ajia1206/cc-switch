@@ -139,6 +139,33 @@ describe("UsageDashboard", () => {
     ).toBeInTheDocument();
   });
 
+  it("shows friendly subscription labels while keeping raw model filter values", () => {
+    useModelStatsMock.mockReturnValue({
+      data: [
+        {
+          model: "chatgpt/gpt-5.6-sol#billing=subscription",
+          requestCount: 0,
+          totalTokens: 97_126_000,
+          totalCost: "0",
+          avgCostPerRequest: "0",
+        },
+      ],
+    });
+
+    renderDashboard();
+
+    const label = screen.getByText("GPT-5.6 Sol");
+    expect(label).toBeInTheDocument();
+    expect(label.closest("[value]")).toHaveAttribute(
+      "value",
+      "v:chatgpt/gpt-5.6-sol#billing=subscription",
+    );
+    expect(screen.getByText("订阅")).toBeInTheDocument();
+    expect(
+      screen.queryByText("chatgpt/gpt-5.6-sol#billing=subscription"),
+    ).not.toBeInTheDocument();
+  });
+
   it("filters usage queries to Pi", async () => {
     renderDashboard();
 

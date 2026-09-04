@@ -68,6 +68,13 @@ const CODEX_WEB_SEARCH_REJECT_HOSTS: &[&str] = &[
     "longcat.chat",   // Meituan LongCat (api.longcat.chat)
     "minimax.io",     // MiniMax global (api.minimax.io)
     "minimaxi.com",   // MiniMax CN (api.minimaxi.com)
+    // Zhipu GLM CN / global (open.bigmodel.cn, api.z.ai): the native Responses
+    // gateway's tool-type enum is `function | web_search_preview |
+    // code_interpreter | mcp` (verbatim from the #6944 400 body) — Codex's
+    // `web_search` hosted tool is not in it. Matched on host labels (see
+    // `codex_url_host_matches_any`), so `xyz.ai` never collides with `z.ai`.
+    "bigmodel.cn",
+    "z.ai",
 ];
 
 /// Brand prefixes of models whose native gateways reject `web_search`, matched
@@ -75,7 +82,41 @@ const CODEX_WEB_SEARCH_REJECT_HOSTS: &[&str] = &[
 /// `MiniMaxAI/MiniMax-M3` are caught. Exact brand names (not a fuzzy heuristic),
 /// so a supporting gateway is never wrongly matched.
 const CODEX_WEB_SEARCH_REJECT_MODEL_PREFIXES: &[&str] =
-    &["mimo", "longcat", "minimax", "qwen3-coder"];
+    &["mimo", "longcat", "minimax", "qwen3-coder", "glm"];
+
+/// Host component of a base URL (or a bare host), lowercased, without scheme,
+/// userinfo, port, path or query. Tolerates the loose forms users paste into
+/// the provider form (`example.com`, `https://user@Example.com:8443/v1`).
+pub(crate) fn codex_url_host(url_or_host: &str) -> String {
+    let trimmed = url_or_host.trim();
+    let rest = trimmed
+        .split_once("://")
+        .map_or(trimmed, |(_scheme, rest)| rest);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host_port = authority.rsplit('@').next().unwrap_or(authority);
+    let host = if let Some(ipv6) = host_port.strip_prefix('[') {
+        ipv6.split(']').next().unwrap_or(ipv6)
+    } else {
+        host_port.split(':').next().unwrap_or(host_port)
+    };
+    host.trim_end_matches('.').to_ascii_lowercase()
+}
+
+/// Whether the URL's host IS one of `hosts` or a subdomain of it, matched on
+/// DNS label boundaries. Vendor host lists must go through this rather than a
+/// substring `contains`: a 4-char entry like `z.ai` would otherwise also match
+/// `api.xyz.ai` / `viz.ai` and silently push an unrelated provider onto a
+/// vendor-specific code path.
+pub(crate) fn codex_url_host_matches_any(url_or_host: &str, hosts: &[&str]) -> bool {
+    let host = codex_url_host(url_or_host);
+    if host.is_empty() {
+        return false;
+    }
+    hosts.iter().any(|candidate| {
+        let candidate = candidate.trim_start_matches('.').to_ascii_lowercase();
+        host == candidate || host.ends_with(&format!(".{candidate}"))
+    })
+}
 
 /// Top-level `model` id from a Codex `config.toml`.
 fn codex_top_level_model(config_text: &str) -> Option<String> {
@@ -92,11 +133,7 @@ fn codex_top_level_model(config_text: &str) -> Option<String> {
 /// the live `config.toml`, so it applies to existing providers without a re-save.
 fn codex_native_gateway_rejects_web_search(config_text: &str) -> bool {
     if let Some(base_url) = extract_codex_base_url(config_text) {
-        let base_url = base_url.to_ascii_lowercase();
-        if CODEX_WEB_SEARCH_REJECT_HOSTS
-            .iter()
-            .any(|host| base_url.contains(host))
-        {
+        if codex_url_host_matches_any(&base_url, CODEX_WEB_SEARCH_REJECT_HOSTS) {
             return true;
         }
     }
@@ -1996,7 +2033,12 @@ fn codex_vendor_catalog_model_entry(
 /// field ..."). `base_instructions` is the other known required field; the
 /// templates always carry it and `codex_catalog_model_entry` handles it.
 /// When Codex requires a new field, add it here AND to the static templates.
-const CODEX_CATALOG_PARSER_REQUIRED_FIELDS: &[&str] = &["supports_reasoning_summaries"];
+const CODEX_CATALOG_PARSER_REQUIRED_FIELDS: &[&str] = &[
+    "supports_reasoning_summaries",
+    // codex 0.148.0 rejects the catalog without it (#6661); a models_cache.json
+    // written by an older build can lack it.
+    "supports_parallel_tool_calls",
+];
 
 /// `models_cache.json` is shared by every Codex install on the machine (npm
 /// CLI, desktop-bundled binary, ...), and each version serializes its own
@@ -3040,6 +3082,50 @@ fn normalize_codex_legacy_openai_reroute(config_text: &str) -> Result<Option<Str
     }
 
     Ok(Some(doc.to_string()))
+}
+
+/// Flip a proxy-managed OAuth card's `requires_openai_auth = true` to
+/// `false` on the active custom provider table.
+///
+/// Such cards (xai_oauth, github_copilot, …) are keyless by design — the
+/// local proxy injects the real token per request, and the stored config is
+/// only a snapshot of the upstream shape — yet their presets inherited the
+/// pre-0.149 template's `requires_openai_auth = true`. Left in place, the
+/// keyless safety gate rightly refuses the switch
+/// (`provider.codex.config.official_auth_fallback`), and on disk the flag
+/// would either send a preserved official login to the third-party endpoint
+/// or trap Codex on the login screen. Forcing `false` makes the snapshot
+/// honest about its keyless state: 0.149 resolves the provider as
+/// unauthenticated and never reads auth.json, so the gate passes on its own
+/// merits instead of being exempted. Callers gate on
+/// `Provider::uses_proxy_injected_oauth` — `codex_oauth` cards must never
+/// come through here, the official login IS their credential.
+///
+/// Returns `Some(updated)` only when the flag was an explicit `true`;
+/// absent/false flags, non-custom routing, and unparsable TOML pass through
+/// unchanged (`None`) so downstream validators keep ownership of errors.
+pub fn neutralize_codex_official_auth_fallback_for_proxy_oauth(
+    config_text: &str,
+) -> Option<String> {
+    let mut doc = config_text.parse::<DocumentMut>().ok()?;
+    let provider_id = active_codex_model_provider_id(&doc)?;
+    if !is_custom_codex_model_provider_id(&provider_id) {
+        return None;
+    }
+    let provider_table = doc
+        .get_mut("model_providers")
+        .and_then(|item| item.as_table_like_mut())
+        .and_then(|table| table.get_mut(provider_id.as_str()))
+        .and_then(|item| item.as_table_like_mut())?;
+    if provider_table
+        .get("requires_openai_auth")
+        .and_then(|item| item.as_bool())
+        != Some(true)
+    {
+        return None;
+    }
+    provider_table.insert("requires_openai_auth", toml_edit::value(false));
+    Some(doc.to_string())
 }
 
 /// Align the active custom provider table's `requires_openai_auth` with the
@@ -4981,6 +5067,48 @@ http_headers = { Authorization = "Bearer explicit-header-token" }
     }
 
     #[test]
+    fn neutralize_proxy_oauth_fallback_flips_only_active_custom_true() {
+        // The managed-OAuth preset snapshot (keyless card carrying the legacy
+        // template flag): flagged by the gate as-is, clean once neutralized.
+        let poisoned = "model_provider = \"custom\"\nmodel = \"grok-4.5\"\n\n[model_providers.custom]\nname = \"xai\"\nbase_url = \"https://api.x.ai/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n";
+        let neutralized = neutralize_codex_official_auth_fallback_for_proxy_oauth(poisoned)
+            .expect("explicit true on the active custom table must be flipped");
+        assert!(neutralized.contains("requires_openai_auth = false"));
+        assert!(codex_config_falls_back_to_official_auth_for_third_party(
+            poisoned
+        ));
+        assert!(!codex_config_falls_back_to_official_auth_for_third_party(
+            &neutralized
+        ));
+        // Idempotent: the neutralized snapshot passes through unchanged.
+        assert!(neutralize_codex_official_auth_fallback_for_proxy_oauth(&neutralized).is_none());
+
+        // Inline-table containers must be reachable too (as_table_like, not
+        // as_table — the recurring 0.149 inline-table lesson).
+        let inline = "model_provider = \"custom\"\nmodel_providers = { custom = { base_url = \"https://api.x.ai/v1\", requires_openai_auth = true } }\n";
+        let inline_neutralized = neutralize_codex_official_auth_fallback_for_proxy_oauth(inline)
+            .expect("inline provider table must be neutralized");
+        assert!(inline_neutralized.contains("requires_openai_auth = false"));
+
+        for untouched in [
+            // absent flag — already the safe keyless shape
+            "model_provider = \"custom\"\n\n[model_providers.custom]\nbase_url = \"https://api.x.ai/v1\"\n",
+            // built-in routing / top-level reroute: the gate keeps ownership
+            // of those shapes, this function only mends the active custom table
+            "model_provider = \"openai\"\nopenai_base_url = \"https://relay.example/v1\"\n",
+            "openai_base_url = \"https://relay.example/v1\"\n",
+            // missing table / unparsable TOML: downstream validators report
+            "model_provider = \"custom\"\n",
+            "model_provider = [",
+        ] {
+            assert!(
+                neutralize_codex_official_auth_fallback_for_proxy_oauth(untouched).is_none(),
+                "shape must pass through unchanged:\n{untouched}"
+            );
+        }
+    }
+
+    #[test]
     fn legacy_openai_reroute_is_normalized_into_a_custom_table() {
         let legacy = r#"# keep me
 model = "gpt-5.4"
@@ -6300,6 +6428,18 @@ base_url = "https://production.api/v1"
         assert!(template.get("supports_search_tool").is_none());
         assert!(template.get("supports_image_detail_original").is_none());
         assert!(template.get("web_search_tool_type").is_none());
+
+        // A cache template missing supports_parallel_tool_calls gets the
+        // static gpt-5.5 default backfilled (codex 0.148.0 rejects the
+        // catalog without it, #6661).
+        let mut stale = json!({ "slug": "gpt-5.5" });
+        fill_template_fields_from_static(&mut stale);
+        assert_eq!(
+            stale
+                .get("supports_parallel_tool_calls")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
     }
 
     #[test]
@@ -6327,6 +6467,12 @@ base_url = "https://production.api/v1"
         assert_eq!(
             catalog["models"][0]
                 .get("supports_reasoning_summaries")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            catalog["models"][0]
+                .get("supports_parallel_tool_calls")
                 .and_then(Value::as_bool),
             Some(true)
         );
@@ -7141,6 +7287,8 @@ web_search = "disabled"
             ("LongCat-2.0", "https://api.longcat.chat/openai/v1"),
             ("MiniMax-M3", "https://api.minimax.io/v1"),
             ("MiniMax-M3", "https://api.minimaxi.com/v1"),
+            ("glm-5.3", "https://open.bigmodel.cn/api/v1"),
+            ("glm-5.3", "https://api.z.ai/api/v1"),
         ] {
             assert!(
                 codex_native_gateway_rejects_web_search(&cfg(model, host)),
@@ -7154,6 +7302,7 @@ web_search = "disabled"
             ("MiniMax-M3", "https://api.siliconflow.cn/v1"),
             ("MiniMaxAI/MiniMax-M3", "https://api.siliconflow.cn/v1"),
             ("mimo-v2.5-pro", "https://some-aggregator.example/v1"),
+            ("zai-org/glm-5.3", "https://some-aggregator.example/v1"),
             (
                 "qwen/qwen3-coder-plus",
                 "https://some-aggregator.example/v1",
@@ -7187,12 +7336,46 @@ web_search = "disabled"
                 "https://ark.cn-beijing.volces.com/api/v3",
             ),
             ("Pro/moonshotai/Kimi-K2.6", "https://api.siliconflow.cn/v1"),
+            // Host-label matching: `z.ai` / `bigmodel.cn` must not swallow
+            // unrelated domains that merely contain them as a substring.
+            ("gpt-5.5", "https://api.xyz.ai/v1"),
+            ("gpt-5.5", "https://viz.ai/v1"),
+            ("gpt-5.5", "https://notbigmodel.cn/v1"),
+            ("gpt-5.5", "https://z.ai.example.com/v1"),
         ] {
             assert!(
                 !codex_native_gateway_rejects_web_search(&cfg(model, host)),
                 "{model} @ {host} should NOT be blacklisted"
             );
         }
+    }
+
+    #[test]
+    fn url_host_matcher_uses_label_boundaries() {
+        let hosts = &["z.ai", "bigmodel.cn"];
+        for url in [
+            "https://api.z.ai/api/v1",
+            "https://open.bigmodel.cn/api/v1",
+            "https://Open.BigModel.cn/api/coding/paas/v4",
+            "https://user:pw@api.z.ai:8443/api/v1?x=1#f",
+            "z.ai",
+            "api.z.ai.",
+        ] {
+            assert!(codex_url_host_matches_any(url, hosts), "{url}");
+        }
+        for url in [
+            "https://api.xyz.ai/v1",
+            "https://viz.ai/v1",
+            "https://z.ai.example.com/v1",
+            "https://notbigmodel.cn/v1",
+            "https://example.com/z.ai/v1",
+            "https://example.com/?next=https://api.z.ai",
+            "",
+        ] {
+            assert!(!codex_url_host_matches_any(url, hosts), "{url}");
+        }
+        assert_eq!(codex_url_host("https://[::1]:8080/v1"), "::1");
+        assert_eq!(codex_url_host("HTTP://Example.COM:80"), "example.com");
     }
 
     #[test]

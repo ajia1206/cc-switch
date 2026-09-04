@@ -217,6 +217,7 @@ impl<'a> UsageLogger<'a> {
                 );
             }
             crate::usage_events::notify_log_recorded();
+            crate::services::usage_spool::append_proxy_event(log, created_at);
         }
 
         Ok(())

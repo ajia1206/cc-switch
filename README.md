@@ -143,6 +143,45 @@ pnpm tauri build
 
 ---
 
+## 🗂 项目结构
+
+```
+├── src/                        # Frontend (React + TypeScript)
+│   ├── components/
+│   │   ├── providers/          # Provider management
+│   │   ├── mcp/                # MCP panel
+│   │   ├── prompts/            # Prompts management
+│   │   ├── skills/             # Skills management
+│   │   ├── sessions/           # Session Manager
+│   │   ├── proxy/              # Proxy mode panel
+│   │   ├── openclaw/           # OpenClaw config panels
+│   │   ├── settings/           # Settings (Terminal/Backup/About)
+│   │   ├── deeplink/           # Deep Link import
+│   │   ├── env/                # Environment variable management
+│   │   ├── universal/          # Cross-app configuration
+│   │   ├── usage/              # Usage statistics
+│   │   └── ui/                 # shadcn/ui component library
+│   ├── hooks/                  # Custom hooks (business logic)
+│   ├── lib/
+│   │   ├── api/                # Tauri API wrapper (type-safe)
+│   │   └── query/              # TanStack Query config
+│   ├── i18n/                   # Internationalization
+│   │   └── locales/            # Translations (zh/zh-TW/en/ja)
+│   ├── config/                 # Presets (providers/mcp)
+│   └── types/                  # TypeScript definitions
+├── src-tauri/                  # Backend (Rust)
+│   └── src/
+│       ├── commands/           # Tauri command layer (by domain)
+│       ├── services/           # Business logic layer
+│       ├── database/           # SQLite DAO layer
+│       ├── proxy/              # Proxy module
+│       ├── session_manager/    # Session management
+│       ├── deeplink/           # Deep Link handling
+│       └── mcp/                # MCP sync module
+├── tests/                      # Frontend tests
+└── assets/                     # Screenshots & partner resources
+```
+
 ## 🛠 技术实现
 
 | 模块 | 文件 | 说明 |

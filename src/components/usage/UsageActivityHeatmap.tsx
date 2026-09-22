@@ -100,6 +100,14 @@ const INTENSITY_CLASSES: Record<
     4: "border-fuchsia-500/30 bg-fuchsia-500/75",
     5: "border-fuchsia-500/40 bg-fuchsia-600",
   },
+  mcode: {
+    0: "border-border/50 bg-muted/50",
+    1: "border-cyan-500/15 bg-cyan-500/20",
+    2: "border-cyan-500/20 bg-cyan-500/35",
+    3: "border-cyan-500/25 bg-cyan-500/55",
+    4: "border-cyan-500/30 bg-cyan-500/75",
+    5: "border-cyan-500/40 bg-cyan-600",
+  },
   maka: {
     0: "border-border/50 bg-muted/50",
     1: "border-fuchsia-500/15 bg-fuchsia-500/20",
@@ -142,6 +150,7 @@ function getFilterType(appType?: string): AppType | "all" {
     appType === "grokbuild" ||
     appType === "opencode" ||
     appType === "pi" ||
+    appType === "mcode" ||
     appType === "maka" ||
     appType === "codepilot" ||
     appType === "deepseek_harness" ||

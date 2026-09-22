@@ -4107,4 +4107,41 @@ mod tests {
         assert_eq!(fingerprint, None, "存量行的尾部指纹必须为 NULL");
         Ok(())
     }
+
+    #[test]
+    fn migrate_v18_to_v19_adds_mcode_flags_and_preserves_rows() -> Result<(), AppError> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch(
+            "CREATE TABLE mcp_servers (
+                id TEXT PRIMARY KEY,
+                enabled_codex BOOLEAN NOT NULL DEFAULT 0
+             );
+             CREATE TABLE skills (
+                id TEXT PRIMARY KEY,
+                enabled_codex BOOLEAN NOT NULL DEFAULT 0
+             );
+             INSERT INTO mcp_servers (id, enabled_codex) VALUES ('mcp-1', 1);
+             INSERT INTO skills (id, enabled_codex) VALUES ('skill-1', 1);",
+        )?;
+        Database::set_user_version(&conn, 18)?;
+
+        Database::apply_schema_migrations_on_conn(&conn)?;
+
+        assert_eq!(Database::get_user_version(&conn)?, SCHEMA_VERSION);
+        assert!(Database::has_column(&conn, "mcp_servers", "enabled_mcode")?);
+        assert!(Database::has_column(&conn, "skills", "enabled_mcode")?);
+        let mcp_values: (i64, i64) = conn.query_row(
+            "SELECT enabled_codex, enabled_mcode FROM mcp_servers WHERE id = 'mcp-1'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let skill_values: (i64, i64) = conn.query_row(
+            "SELECT enabled_codex, enabled_mcode FROM skills WHERE id = 'skill-1'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(mcp_values, (1, 0));
+        assert_eq!(skill_values, (1, 0));
+        Ok(())
+    }
 }

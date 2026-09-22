@@ -8,6 +8,7 @@ import {
 import { useRequestDetail } from "@/lib/query/usage";
 import { getFreshInputTokens, isUnpricedUsage } from "@/types/usage";
 import { parseStrictUsageCost, UsageModelLabel } from "./UsageModelLabel";
+import { formatOutputTokensPerSecond } from "./format";
 
 interface RequestDetailPanelProps {
   requestId: string;
@@ -65,6 +66,7 @@ export function RequestDetailPanel({
   const costMultiplier = parseStrictUsageCost(request.costMultiplier);
   const hasCostMultiplier = costMultiplier != null && costMultiplier !== 1;
   const unpriced = totalCost != null && isUnpricedUsage(request);
+  const outputTps = formatOutputTokensPerSecond(request);
 
   return (
     <Dialog open onOpenChange={onClose}>
@@ -190,6 +192,11 @@ export function RequestDetailPanel({
                 </dt>
                 <dd className="font-mono">
                   {request.outputTokens.toLocaleString()}
+                  {outputTps != null && (
+                    <span className="ml-2 text-xs text-muted-foreground font-normal">
+                      ({outputTps} tps)
+                    </span>
+                  )}
                 </dd>
               </div>
               <div>

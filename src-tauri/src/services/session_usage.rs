@@ -189,6 +189,11 @@ pub fn sync_cindy_unlocked(db: &Database) -> SessionSyncResult {
         "Cindy",
         crate::services::session_usage_desktop::sync_cindy_usage(db),
     );
+    merge_sync_step(
+        &mut result,
+        "MCode",
+        crate::services::session_usage_mcode::sync_mcode_usage(db),
+    );
     notify_sync_result(&result);
     result
 }

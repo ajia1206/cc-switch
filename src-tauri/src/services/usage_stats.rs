@@ -3191,11 +3191,11 @@ mod tests {
                 ))
             },
         )?;
-        assert_eq!(input_cost, "1.000000");
-        assert_eq!(output_cost, "3.000000");
-        assert_eq!(cache_read_cost, "0.400000");
-        assert_eq!(cache_creation_cost, "0.125000");
-        assert_eq!(total_cost, "4.525000");
+        assert_eq!(input_cost, "0.800000");
+        assert_eq!(output_cost, "2.000000");
+        assert_eq!(cache_read_cost, "0.320000");
+        assert_eq!(cache_creation_cost, "0.100000");
+        assert_eq!(total_cost, "3.220000");
 
         Ok(())
     }

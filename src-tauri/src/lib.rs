@@ -12,6 +12,7 @@ mod commands;
 mod config;
 mod database;
 mod deeplink;
+mod dsh_config;
 mod error;
 mod gemini_config;
 mod gemini_mcp;
@@ -906,6 +907,13 @@ pub fn run() {
                 Ok(_) => log::debug!("○ No Pi provider changes from native config"),
                 Err(e) => log::warn!("✗ Failed to import Pi providers: {e}"),
             }
+            match crate::services::provider::import_dsh_providers_from_live(&app_state) {
+                Ok(count) if count > 0 => {
+                    log::info!("✓ Synced {count} DeepSeek Harness provider(s) from native config");
+                }
+                Ok(_) => log::debug!("○ No DeepSeek Harness provider changes from native config"),
+                Err(e) => log::warn!("✗ Failed to import DeepSeek Harness providers: {e}"),
+            }
 
             // 2. OMO 配置导入（当数据库中无 OMO provider 时，从本地文件导入）
             {
@@ -1777,6 +1785,9 @@ pub fn run() {
             // OpenCode specific
             commands::import_opencode_providers_from_live,
             commands::get_opencode_live_provider_ids,
+            // DeepSeek Harness specific
+            commands::import_dsh_providers_from_live,
+            commands::get_dsh_live_provider_ids,
             // OpenClaw specific
             commands::import_openclaw_providers_from_live,
             commands::get_openclaw_live_provider_ids,

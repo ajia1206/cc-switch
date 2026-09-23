@@ -204,6 +204,20 @@ export const providersApi = {
   async importHermesFromLive(): Promise<number> {
     return await invoke("import_hermes_providers_from_live");
   },
+
+  /**
+   * 获取 DeepSeek Harness live 配置中的供应商 ID 列表
+   */
+  async getDshLiveProviderIds(): Promise<string[]> {
+    return await invoke("get_dsh_live_provider_ids");
+  },
+
+  /**
+   * 从 DeepSeek Harness live 配置导入供应商到数据库
+   */
+  async importDshFromLive(): Promise<number> {
+    return await invoke("import_dsh_providers_from_live");
+  },
 };
 
 // ============================================================================

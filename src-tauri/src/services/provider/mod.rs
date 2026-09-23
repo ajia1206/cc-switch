@@ -24,8 +24,8 @@ use crate::store::AppState;
 
 // Re-export sub-module functions for external access
 pub use live::{
-    import_default_config, import_hermes_providers_from_live, import_openclaw_providers_from_live,
-    import_opencode_providers_from_live, read_live_settings,
+    import_default_config, import_dsh_providers_from_live, import_hermes_providers_from_live,
+    import_openclaw_providers_from_live, import_opencode_providers_from_live, read_live_settings,
     should_import_default_config_on_startup, sync_current_to_live,
     update_toml_common_config_snippet,
 };
@@ -46,8 +46,8 @@ pub(crate) use live::{
 
 // Internal re-exports
 use live::{
-    remove_hermes_provider_from_live, remove_openclaw_provider_from_live,
-    remove_opencode_provider_from_live, write_gemini_live,
+    remove_dsh_provider_from_live, remove_hermes_provider_from_live,
+    remove_openclaw_provider_from_live, remove_opencode_provider_from_live, write_gemini_live,
 };
 use usage::validate_usage_script;
 
@@ -5611,6 +5611,7 @@ impl ProviderService {
                     AppType::OpenClaw => remove_openclaw_provider_from_live(id)?,
                     AppType::Hermes => remove_hermes_provider_from_live(id)?,
                     AppType::Mcode => crate::mcode_config::remove_provider(id)?,
+                    AppType::Dsh => remove_dsh_provider_from_live(id)?,
                     _ => {}
                 }
             }
@@ -5681,6 +5682,9 @@ impl ProviderService {
                 remove_hermes_provider_from_live(id)?;
             }
             AppType::Mcode => crate::mcode_config::remove_provider(id)?,
+            AppType::Dsh => {
+                remove_dsh_provider_from_live(id)?;
+            }
             _ => {
                 return Err(AppError::Message(format!(
                     "App {} does not support remove from live config",
@@ -6033,6 +6037,21 @@ impl ProviderService {
                     .push(format!("hermes_model_defaults_failed:{}", provider.id));
             }
         }
+        // DSH is additive too, but it also has a single active provider in
+        // `agent-default-model`. Point it at this provider (and its first
+        // declared model) so clicking "switch" actually changes what DSH uses.
+        if matches!(app_type, AppType::Dsh) {
+            let model = crate::dsh_config::first_model_id(&provider.settings_config);
+            if let Err(e) = crate::dsh_config::set_default_model(&provider.id, model.as_deref()) {
+                log::warn!(
+                    "Failed to update DSH default model after switching to '{}': {e}",
+                    provider.id
+                );
+                result
+                    .warnings
+                    .push(format!("dsh_model_defaults_failed:{}", provider.id));
+            }
+        }
 
         // For additive-mode providers that were DB-only (live_config_managed == Some(false)),
         // flip the flag to true now that the provider has been successfully written to the live
@@ -6050,6 +6069,7 @@ impl ProviderService {
                     AppType::OpenClaw => remove_openclaw_provider_from_live(&provider.id),
                     AppType::Hermes => remove_hermes_provider_from_live(&provider.id),
                     AppType::Mcode => crate::mcode_config::remove_provider(&provider.id),
+                    AppType::Dsh => remove_dsh_provider_from_live(&provider.id),
                     _ => Ok(()),
                 };
 
@@ -6314,7 +6334,7 @@ impl ProviderService {
             AppType::OpenCode => Self::extract_opencode_common_config(&provider.settings_config),
             AppType::OpenClaw => Self::extract_openclaw_common_config(&provider.settings_config),
             AppType::Hermes => Ok(String::new()), // Hermes doesn't use common config snippets
-            AppType::Pi | AppType::Mcode => Ok(String::new()),
+            AppType::Pi | AppType::Mcode | AppType::Dsh => Ok(String::new()),
         }
     }
 
@@ -6332,7 +6352,7 @@ impl ProviderService {
             AppType::OpenCode => Self::extract_opencode_common_config(settings_config),
             AppType::OpenClaw => Self::extract_openclaw_common_config(settings_config),
             AppType::Hermes => Ok(String::new()), // Hermes doesn't use common config snippets
-            AppType::Pi | AppType::Mcode => Ok(String::new()),
+            AppType::Pi | AppType::Mcode | AppType::Dsh => Ok(String::new()),
         }
     }
 
@@ -7104,6 +7124,15 @@ impl ProviderService {
             AppType::Pi => {
                 crate::pi_config::validate_provider_node(&provider.id, &provider.settings_config)?;
             }
+            AppType::Dsh => {
+                if !provider.settings_config.is_object() {
+                    return Err(AppError::localized(
+                        "provider.dsh.settings.not_object",
+                        "DSH 配置必须是 JSON 对象",
+                        "DSH configuration must be a JSON object",
+                    ));
+                }
+            }
         }
 
         // Validate and clean UsageScript configuration (common for all app types)
@@ -7306,6 +7335,22 @@ impl ProviderService {
                     .unwrap_or("")
                     .to_string();
 
+                Ok((api_key, base_url))
+            }
+            AppType::Dsh => {
+                let api_key = provider
+                    .settings_config
+                    .get("apiKey")
+                    .or_else(|| provider.settings_config.get("apiKeyEnv"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let base_url = provider
+                    .settings_config
+                    .get("baseURL")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 Ok((api_key, base_url))
             }
             AppType::OpenClaw | AppType::Hermes | AppType::Pi | AppType::Mcode => {

@@ -897,6 +897,8 @@
     "hermesConfigDirDescription": "Hermes の設定ディレクトリ（config.yaml）を上書きします。",
     "piConfigDir": "Pi 設定ディレクトリ",
     "piConfigDirDescription": "Pi の設定ディレクトリ（models.json、指示ファイル、プロンプト、Skills、セッション）を上書きします。",
+    "dshConfigDir": "DeepSeek Harness 設定ディレクトリ",
+    "dshConfigDirDescription": "DeepSeek Harness の設定ディレクトリ（settings.yaml、.credentials.yaml）を上書きします。",
     "browsePlaceholderClaude": "例: /home/<your-username>/.claude",
     "browsePlaceholderCodex": "例: /home/<your-username>/.codex",
     "browsePlaceholderGemini": "例: /home/<your-username>/.gemini",
@@ -1018,7 +1020,8 @@
     "openclaw": "OpenClaw",
     "hermes": "Hermes",
     "pi": "Pi",
-    "mcode": "MiniMax Code"
+    "mcode": "MiniMax Code",
+    "dsh": "DeepSeek Harness"
   },
   "pi": {
     "empty": {

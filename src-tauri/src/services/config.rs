@@ -142,6 +142,10 @@ impl ConfigService {
                 // Pi owns its shared models/settings documents; this legacy
                 // single-provider live-sync path must not rewrite them.
             }
+            AppType::Dsh => {
+                // DSH uses additive mode; providers are written by the DSH
+                // provider service, not this legacy live-sync path.
+            }
         }
 
         Ok(())

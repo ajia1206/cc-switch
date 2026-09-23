@@ -172,6 +172,7 @@ impl McpService {
             }
             AppType::Mcode => mcp::mcode::sync(&server.id, Some(&server.server))?,
             AppType::Pi => {}
+            AppType::Dsh => {}
         }
         Ok(())
     }
@@ -213,6 +214,7 @@ impl McpService {
             }
             AppType::Mcode => mcp::mcode::sync(id, None)?,
             AppType::Pi => {}
+            AppType::Dsh => {}
         }
         Ok(())
     }

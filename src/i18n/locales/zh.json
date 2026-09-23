@@ -897,6 +897,8 @@
     "hermesConfigDirDescription": "覆盖 Hermes 配置目录 (config.yaml)。",
     "piConfigDir": "Pi 配置目录",
     "piConfigDirDescription": "覆盖 Pi 配置目录（models.json、指令文件、提示词、Skills 与会话）。",
+    "dshConfigDir": "DeepSeek Harness 配置目录",
+    "dshConfigDirDescription": "覆盖 DeepSeek Harness 配置目录（settings.yaml、.credentials.yaml）。",
     "browsePlaceholderClaude": "例如：/home/<你的用户名>/.claude",
     "browsePlaceholderCodex": "例如：/home/<你的用户名>/.codex",
     "browsePlaceholderGemini": "例如：/home/<你的用户名>/.gemini",
@@ -1018,7 +1020,8 @@
     "openclaw": "OpenClaw",
     "hermes": "Hermes",
     "pi": "Pi",
-    "mcode": "MiniMax Code"
+    "mcode": "MiniMax Code",
+    "dsh": "DeepSeek Harness"
   },
   "pi": {
     "empty": {

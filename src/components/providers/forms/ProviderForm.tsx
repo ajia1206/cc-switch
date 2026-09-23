@@ -2719,7 +2719,7 @@ function ProviderFormFull({
               </div>
               {settingsConfigErrorField}
             </>
-          ) : appId === "openclaw" || appId === "hermes" ? (
+          ) : appId === "openclaw" || appId === "hermes" || appId === "dsh" ? (
             <>
               <div className="space-y-2">
                 <Label htmlFor="settingsConfig">
@@ -2735,7 +2735,15 @@ function ProviderFormFull({
   "base_url": "https://api.example.com/v1",
   "api_key": ""
 }`
-                      : `{
+                      : appId === "dsh"
+                        ? `{
+  "displayName": "My Provider",
+  "api": "openai-completions",
+  "baseURL": "https://api.example.com/v1",
+  "apiKeyEnv": "MY_PROVIDER_API_KEY",
+  "models": [{ "id": "deepseek-v4-1-flash" }]
+}`
+                        : `{
   "baseUrl": "https://api.example.com/v1",
   "apiKey": "your-api-key-here",
   "api": "openai-completions",

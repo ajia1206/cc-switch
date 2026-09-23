@@ -157,6 +157,7 @@ pub(crate) fn build_provider_from_request(
                 "Add MCode providers from the MCode page".into(),
             ))
         }
+        AppType::Dsh => build_additive_app_settings(request),
         AppType::Pi => {
             return Err(AppError::InvalidInput(
                 "Pi providers must be added from the Pi provider page".to_string(),

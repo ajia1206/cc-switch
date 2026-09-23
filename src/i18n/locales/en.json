@@ -897,6 +897,8 @@
     "hermesConfigDirDescription": "Override Hermes configuration directory (config.yaml).",
     "piConfigDir": "Pi Configuration Directory",
     "piConfigDirDescription": "Override the Pi configuration directory (models.json, instruction files, prompts, skills, and sessions).",
+    "dshConfigDir": "DeepSeek Harness Configuration Directory",
+    "dshConfigDirDescription": "Override the DeepSeek Harness configuration directory (settings.yaml, .credentials.yaml).",
     "browsePlaceholderClaude": "e.g., /home/<your-username>/.claude",
     "browsePlaceholderCodex": "e.g., /home/<your-username>/.codex",
     "browsePlaceholderGemini": "e.g., /home/<your-username>/.gemini",
@@ -1018,7 +1020,8 @@
     "openclaw": "OpenClaw",
     "hermes": "Hermes",
     "pi": "Pi",
-    "mcode": "MiniMax Code"
+    "mcode": "MiniMax Code",
+    "dsh": "DeepSeek Harness"
   },
   "pi": {
     "empty": {

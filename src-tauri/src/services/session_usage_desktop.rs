@@ -3,8 +3,9 @@
 //! 当前支持：
 //! - Maka: `runtime.sqlite/usage_model_call_attempts`，每行是一轮真实 provider 尝试。
 //! - CodePilot: `~/.codepilot/codepilot.db/messages.token_usage`，每行是一条已完成回复。
-//! - DeepSeek Harness: `~/.dsh/sessions/**/session.jsonl.zstd`，每条最终
-//!   `assistant/message` 事件是一轮模型调用。
+//! - DeepSeek Harness: `~/.dsh/sessions/**/session[.vN].jsonl[.zstd]`，每条最终
+//!   `assistant/message` 事件是一轮模型调用。DSH 为每个 Session 格式代次保留一份
+//!   不可变日志，目录中的最高代次才是当前日志，因此每个会话目录只读取最高代次。
 //!
 //! 所有来源都只读打开，并使用来源内的稳定主键生成 request_id，避免定时同步重复入账。
 
@@ -2226,9 +2227,38 @@ fn deepseek_harness_sessions_dir() -> Option<PathBuf> {
         .map(|dir| dir.join("sessions"))
 }
 
+/// Parse a canonical DSH session-log basename into its format generation.
+///
+/// DSH publishes one immutable log per Session format generation: generation 0
+/// keeps `session.jsonl`, and every later generation carries a lowercase
+/// `.vN` component (`session.v3.jsonl`). Either name may carry the `.zstd`
+/// compression suffix. Temporary, uppercase, leading-zero and `.v0` names are
+/// not canonical and are ignored.
+fn deepseek_harness_log_generation(file_name: &str) -> Option<(u32, bool)> {
+    let (base, compressed) = match file_name.strip_suffix(".zstd") {
+        Some(base) => (base, true),
+        None => (file_name, false),
+    };
+    let rest = base.strip_prefix("session")?;
+    if rest == ".jsonl" {
+        return Some((0, compressed));
+    }
+    let digits = rest.strip_prefix(".v")?.strip_suffix(".jsonl")?;
+    if digits.is_empty()
+        || digits.starts_with('0')
+        || !digits.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let generation = digits.parse::<u32>().ok()?;
+    Some((generation, compressed))
+}
+
+/// Collect every canonical DSH session log below `dir`, at any generation and
+/// either compression suffix.
 fn collect_deepseek_harness_session_files(
     dir: &Path,
-    files: &mut Vec<PathBuf>,
+    files: &mut Vec<(PathBuf, u32, bool)>,
 ) -> Result<(), AppError> {
     if !dir.exists() {
         return Ok(());
@@ -2244,13 +2274,45 @@ fn collect_deepseek_harness_session_files(
         })?;
         if file_type.is_dir() {
             collect_deepseek_harness_session_files(&path, files)?;
-        } else if file_type.is_file()
-            && path.file_name().and_then(|name| name.to_str()) == Some("session.jsonl.zstd")
-        {
-            files.push(path);
+        } else if file_type.is_file() {
+            if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
+                if let Some((generation, compressed)) = deepseek_harness_log_generation(name) {
+                    files.push((path, generation, compressed));
+                }
+            }
         }
     }
     Ok(())
+}
+
+/// Reduce discovered logs to the current generation of every session directory.
+///
+/// DSH keeps historical immutable generations on disk while publishing the
+/// newest one as the session's current log. Historical generations repeat the
+/// same event `seq` values, so reading all of them would double-count model
+/// calls (or merely hide it behind request-id dedup); read only the highest
+/// generation per directory, preferring the compressed artifact on a tie.
+fn select_current_deepseek_harness_session_files(
+    discovered: Vec<(PathBuf, u32, bool)>,
+) -> Vec<PathBuf> {
+    let mut current: HashMap<PathBuf, (u32, bool, PathBuf)> = HashMap::new();
+    for (path, generation, compressed) in discovered {
+        let Some(parent) = path.parent().map(Path::to_path_buf) else {
+            continue;
+        };
+        match current.get_mut(&parent) {
+            Some(existing) if (generation, compressed) > (existing.0, existing.1) => {
+                *existing = (generation, compressed, path);
+            }
+            Some(_) => {}
+            None => {
+                current.insert(parent, (generation, compressed, path));
+            }
+        }
+    }
+    let mut files: Vec<PathBuf> = current.into_values().map(|(_, _, path)| path).collect();
+    files.sort();
+    files
 }
 
 fn parse_deepseek_harness_file(
@@ -2269,13 +2331,21 @@ fn parse_deepseek_harness_file(
             source_path.display()
         ))
     })?;
-    let decoder = zstd::stream::read::Decoder::new(file).map_err(|e| {
-        AppError::Config(format!(
-            "无法解压 DeepSeek Harness 会话 {}: {e}",
-            source_path.display()
-        ))
-    })?;
-    let reader = BufReader::new(decoder);
+    let is_zstd = source_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("zstd"));
+    let reader: Box<dyn BufRead> = if is_zstd {
+        let decoder = zstd::stream::read::Decoder::new(file).map_err(|e| {
+            AppError::Config(format!(
+                "无法解压 DeepSeek Harness 会话 {}: {e}",
+                source_path.display()
+            ))
+        })?;
+        Box::new(BufReader::new(decoder))
+    } else {
+        Box::new(BufReader::new(file))
+    };
     let fallback_session_id = source_path
         .parent()
         .and_then(Path::file_name)
@@ -2399,9 +2469,9 @@ pub fn sync_deepseek_harness_usage(db: &Database) -> Result<SessionSyncResult, A
     let Some(sessions_dir) = deepseek_harness_sessions_dir() else {
         return Ok(empty_result(0));
     };
-    let mut files = Vec::new();
-    collect_deepseek_harness_session_files(&sessions_dir, &mut files)?;
-    files.sort();
+    let mut discovered = Vec::new();
+    collect_deepseek_harness_session_files(&sessions_dir, &mut discovered)?;
+    let files = select_current_deepseek_harness_session_files(discovered);
 
     let mut result = SessionSyncResult::default();
     for file in files {
@@ -4740,14 +4810,51 @@ mod tests {
         )
         .unwrap();
 
-        let mut files = Vec::new();
-        collect_deepseek_harness_session_files(&sessions_dir, &mut files).unwrap();
+        let mut discovered = Vec::new();
+        collect_deepseek_harness_session_files(&sessions_dir, &mut discovered).unwrap();
+        assert_eq!(discovered, vec![(source_path.clone(), 0, true)]);
+        let files = select_current_deepseek_harness_session_files(discovered);
         assert_eq!(files, vec![source_path.clone()]);
 
         let db = Database::memory().unwrap();
         let result = parse_deepseek_harness_file(&db, &source_path).unwrap();
         assert_eq!(result.files_scanned, 1);
         assert_eq!(result.imported, 1);
+    }
+
+    #[test]
+    fn deepseek_harness_selects_current_generation_per_session_directory() {
+        let dir = tempdir().unwrap();
+        let sessions_dir = dir.path().join("sessions");
+        let session_dir = sessions_dir.join("workspace-a/session-a");
+        fs::create_dir_all(&session_dir).unwrap();
+        // Canonical generations plus names DSH never publishes.
+        for name in [
+            "session.jsonl.zstd",
+            "session.v1.jsonl.zstd",
+            "session.v3.jsonl",
+            "session.v3.jsonl.zstd",
+            "session.v0.jsonl.zstd",
+            "session.v03.jsonl.zstd",
+            "session.jsonl.zstd.tmp",
+        ] {
+            fs::write(session_dir.join(name), b"x").unwrap();
+        }
+        // A sibling session resolves to its own current generation.
+        let other_dir = sessions_dir.join("workspace-a/session-b");
+        fs::create_dir_all(&other_dir).unwrap();
+        fs::write(other_dir.join("session.v2.jsonl.zstd"), b"x").unwrap();
+
+        let mut discovered = Vec::new();
+        collect_deepseek_harness_session_files(&sessions_dir, &mut discovered).unwrap();
+        let mut files = select_current_deepseek_harness_session_files(discovered);
+        files.sort();
+        let mut expected = vec![
+            session_dir.join("session.v3.jsonl.zstd"),
+            other_dir.join("session.v2.jsonl.zstd"),
+        ];
+        expected.sort();
+        assert_eq!(files, expected);
     }
 
     #[test]

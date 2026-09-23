@@ -897,6 +897,8 @@
     "hermesConfigDirDescription": "覆寫 Hermes 設定目錄 (config.yaml)。",
     "piConfigDir": "Pi 設定目錄",
     "piConfigDirDescription": "覆寫 Pi 設定目錄（models.json、指示檔案、提示、Skills 與工作階段）。",
+    "dshConfigDir": "DeepSeek Harness 設定目錄",
+    "dshConfigDirDescription": "覆寫 DeepSeek Harness 設定目錄（settings.yaml、.credentials.yaml）。",
     "browsePlaceholderClaude": "例如：/home/<您的帳號>/.claude",
     "browsePlaceholderCodex": "例如：/home/<您的帳號>/.codex",
     "browsePlaceholderGemini": "例如：/home/<您的帳號>/.gemini",
@@ -1019,7 +1021,8 @@
     "openclaw": "OpenClaw",
     "hermes": "Hermes",
     "pi": "Pi",
-    "mcode": "MiniMax Code"
+    "mcode": "MiniMax Code",
+    "dsh": "DeepSeek Harness"
   },
   "pi": {
     "empty": {
